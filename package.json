@@ -99,5 +99,13 @@
       }
     }
   },
-  "packageManager": "pnpm@11.4.0"
+  "packageManager": "pnpm@11.4.0",
+  "pnpm": {
+    "overrides": {
+      "brace-expansion@>=1.0.0 <1.1.13": "1.1.13",
+      "path-to-regexp@>=8.0.0 <8.4.0": "8.4.0",
+      "undici@<7.28.0": "7.28.0",
+      "@opentelemetry/core@>=2.0.0 <2.8.0": "2.8.0"
+    }
+  }
 }
