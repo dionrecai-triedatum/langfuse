@@ -39,6 +39,7 @@ minimumReleaseAgeExclude:
   - "@esbuild/win32-arm64@0.28.1"
   - "@esbuild/win32-ia32@0.28.1"
   - "@esbuild/win32-x64@0.28.1"
+  - eslint-plugin-tailwindcss@4.0.2
 allowBuilds:
   "@prisma/client": true
   "@prisma/engines": true
@@ -65,6 +66,7 @@ overrides:
   nodemailer: 9.0.1
   postcss: 8.5.15
   esbuild: "0.28.1"
+  "undici@7": 7.28.0
   zod: 4.3.6
   nanoid: ^3.3.8
   katex: ^0.16.21
@@ -80,8 +82,12 @@ overrides:
   "@ai-sdk/provider-utils@<=4.0.26": 4.0.27
   "@ai-sdk/provider-utils-v5": "npm:@ai-sdk/provider-utils@4.0.27"
   "@copilotkit/runtime@0.0.0-mme-ag-ui-0-0-46-20260227141603>@ag-ui/langgraph": 0.0.29
+  # Keep Anthropic's Vertex client on an SDK version that emits Vertex rawPredict URLs.
+  # Remove once @langchain/anthropic allows the same SDK range.
+  # Check: https://www.npmjs.com/package/@langchain/anthropic?activeTab=dependencies
+  "@anthropic-ai/vertex-sdk>@anthropic-ai/sdk": 0.104.1
 patchedDependencies:
-  next-auth@4.24.13: patches/next-auth@4.24.13.patch
+  next-auth@4.24.14: patches/next-auth@4.24.14.patch
 publicHoistPattern:
   - "*prisma*"
   - "@aws-sdk/client-s3"

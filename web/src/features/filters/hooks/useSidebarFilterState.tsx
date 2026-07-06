@@ -345,6 +345,14 @@ type UpdateFilter = (
 type BaseUseSidebarFilterStateOptions = {
   loading?: boolean;
   implicitDefaultConfig?: ManagedEnvironmentPolicyInput;
+  /**
+   * Precise per-facet loading set (lazy filter-options): exactly the columns
+   * whose options have been requested but not yet arrived. When provided it
+   * drives the facet skeleton instead of the coarse `loading` flag, so a facet
+   * shows a skeleton only while its own options stream in — and never for
+   * columns that are not server-enumerated (e.g. metadata).
+   */
+  loadingColumns?: ReadonlySet<string>;
 };
 
 export type UseSidebarFilterStateOptions =
@@ -432,13 +440,19 @@ export function useSidebarFilterState(
   >,
   hookOptions: UseSidebarFilterStateOptions = DEFAULT_HOOK_OPTIONS,
 ) {
-  const { loading, implicitDefaultConfig } = hookOptions;
+  const { loading, loadingColumns, implicitDefaultConfig } = hookOptions;
   const stateLocationType = hookOptions.stateLocation;
   const peekContext =
     stateLocationType === "peekContext" ? hookOptions.context : undefined;
   const setPeekTableState = peekContext?.setTableState;
 
   const FILTER_EXPANDED_STORAGE_KEY = `${config.tableName}-filters-expanded`;
+  // Tracks which active-filter columns we have already auto-expanded once, so a
+  // section the user later collapsed is never re-expanded — even across remounts
+  // (route navigation away-and-back, tab reload). It shares the session lifecycle
+  // of the expanded state itself, so the "already reconciled" knowledge survives
+  // exactly as long as the manual collapse it must respect. See LFE-10164 below.
+  const FILTER_SEEDED_STORAGE_KEY = `${config.tableName}-filters-seeded`;
   const DEFAULT_EXPANDED_FILTERS = config.defaultExpanded ?? [];
 
   const [expandedString, setExpandedString] = useSessionStorage<string>(
@@ -453,6 +467,11 @@ export function useSidebarFilterState(
       setExpandedString(value.join(","));
     },
     [setExpandedString],
+  );
+
+  const [seededString, setSeededString] = useSessionStorage<string>(
+    FILTER_SEEDED_STORAGE_KEY,
+    "",
   );
 
   const normalizedSessionFilterContextId =
@@ -548,6 +567,74 @@ export function useSidebarFilterState(
       : stateLocationType === "memory"
         ? memoryFilterState
         : urlFilterState;
+
+  // LFE-10164: When arriving via a URL/deep link that already carries applied
+  // filters, expand the sidebar sections that have an active filter. Sidebar
+  // sections are collapsed by default; without this, a bookmarked/shared link
+  // would render its active facets collapsed. Sections without an active filter
+  // keep their default state.
+  //
+  // We derive this during render (the "adjust state while rendering when a
+  // derived input changes" pattern, https://react.dev/learn/you-might-not-need-an-effect)
+  // rather than in a mount effect. The mount-effect approach had two defects:
+  //   1. Late-arriving URL params: in the Pages Router `useQueryParam` reads
+  //      `router.query`, which is empty on the first render of a direct
+  //      navigation and only populated on a later render. A one-shot mount
+  //      effect seeded against the empty first render and never re-ran, so
+  //      deep-linked sections stayed collapsed. Reconciling during render means
+  //      the moment the filters actually appear (a later render) we seed them.
+  //   2. Remount re-seed: a per-mount guard re-expanded a section the user had
+  //      deliberately collapsed whenever the page remounted. We instead persist
+  //      which columns have already been auto-expanded (`seededString`, same
+  //      session lifecycle as the expanded state) and only expand columns that
+  //      are newly active and not yet reconciled, so a collapsed section is
+  //      never re-expanded.
+  //
+  // We key off `explicitFilterState` (the URL/memory/peek-authored filters),
+  // which already excludes the implicit hidden-environment default — so the
+  // managed-environment section is only auto-expanded when the user actually
+  // authored an environment filter.
+  const seededSet = useMemo(
+    () => new Set(seededString.split(",").filter(Boolean)),
+    [seededString],
+  );
+  const facetColumnSet = useMemo(
+    () => new Set(config.facets.map((facet) => facet.column)),
+    [config.facets],
+  );
+  const newlyActiveFacetColumns = explicitFilterState
+    .map((filter) => filter.column)
+    .filter((column) => facetColumnSet.has(column) && !seededSet.has(column));
+  if (newlyActiveFacetColumns.length > 0) {
+    // setState-during-render (not an effect): React discards this render and
+    // re-renders synchronously with the updated state before painting. The
+    // updates are idempotent — once a column is in `seededSet` it is no longer
+    // "newly active", so this branch does not re-run for it on the next render.
+    setExpandedString((current) => {
+      const expanded = current.split(",").filter(Boolean);
+      const expandedSet = new Set(expanded);
+      const next = [...expanded];
+      for (const column of newlyActiveFacetColumns) {
+        if (!expandedSet.has(column)) {
+          expandedSet.add(column);
+          next.push(column);
+        }
+      }
+      return next.length === expanded.length ? current : next.join(",");
+    });
+    setSeededString((current) => {
+      const seeded = current.split(",").filter(Boolean);
+      const seededColumnSet = new Set(seeded);
+      const next = [...seeded];
+      for (const column of newlyActiveFacetColumns) {
+        if (!seededColumnSet.has(column)) {
+          seededColumnSet.add(column);
+          next.push(column);
+        }
+      }
+      return next.length === seeded.length ? current : next.join(",");
+    });
+  }
 
   const managedEnvironmentPolicyConfig = useMemo(
     () => buildManagedEnvironmentPolicyConfig(implicitDefaultConfig),
@@ -732,7 +819,7 @@ export function useSidebarFilterState(
               column,
               type: "boolean" as const,
               operator: "=" as const,
-              value: invert ? false : true,
+              value: !invert,
             },
           ];
         }
@@ -743,7 +830,7 @@ export function useSidebarFilterState(
               column,
               type: "boolean" as const,
               operator: "=" as const,
-              value: invert ? true : false,
+              value: !!invert,
             },
           ];
         }
@@ -1079,6 +1166,11 @@ export function useSidebarFilterState(
     // Helper to determine if a filter should show loading state
     // Only filters that depend on options from the query should show loading
     const shouldShowLoading = (facetColumn: string): boolean => {
+      // Lazy filter-options: a precise per-facet set is supplied, so a facet
+      // shows a skeleton iff its own column is still in flight. This avoids the
+      // coarse-flag false positive where a never-enumerated facet (metadata,
+      // whose options are always undefined) would skeleton on every refetch.
+      if (loadingColumns) return loadingColumns.has(facetColumn);
       if (!loading) return false;
       // Only show loading if the filter depends on options and options are not yet available
       // Filters that use options: categorical, keyValue, numericKeyValue, stringKeyValue
@@ -1709,6 +1801,7 @@ export function useSidebarFilterState(
     config,
     options,
     loading,
+    loadingColumns,
     filterState,
     explicitFilterState,
     updateFilter,
