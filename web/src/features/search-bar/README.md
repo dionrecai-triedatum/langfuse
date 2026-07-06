@@ -174,13 +174,18 @@ committedText ──resetTo──▶ store.draft ──(type/pick/remove)──�
   planner), `composer-segments.ts` (draft text → renderable token segments),
   `edits.ts` (span-local chip removal with AST-surgery fallback),
   `observed-options.ts` (filterOptions → per-column observed values),
-  `searchBarInvariants.ts` (pure, registry-shaped property-test harness — the
-  universal safety net reused per view; see Hardening).
+  `metadata-paths.ts` (client-side metadata structure analysis; see "Metadata
+  key suggestions"), `searchBarInvariants.ts` (pure, registry-shaped
+  property-test harness — the universal safety net reused per view; see
+  Hardening).
 - `store/searchBarStore.ts` — per-mount vanilla zustand store, **draft only**
   (`setDraft`/`resetTo`/`removeChipSpan`/`revealInvalid`). No committed copy,
   no commit workflow. Provided with the container's `commit` via
   `store/SearchBarStoreProvider.tsx` (`useSearchBarStore` selector,
   `useSearchBarCommit`).
+- `store/observedMetadataStore.ts` — global zustand store persisted to
+  localStorage: per-project map of observed metadata keys → types (the
+  suggestions cache behind "Metadata key suggestions" below).
 - `hooks/useEventsSearchBar.ts` — the container/bridge. Derives `committedText`
   (memo), runs the one `resetTo` effect, and owns the `commit()` workflow
   (planCommit → write filter state + record recent). No URL param of its own;
@@ -246,6 +251,92 @@ encode/decode round-trip. The flat URL contract (`FilterState` + `searchQuery`
   and pressing Enter re-renders the bar as `level:ERROR refund`. The typed
   interleave is preserved only in the recent-searches entry (`planCommit`'s
   `canonical`), not in the live bar.
+
+## AI filter mode (the "Ask AI" button)
+
+The bar is also the home of AI-assisted filtering on v4 (it replaces the legacy
+sidebar "✨ wand" — `EventsTable` now passes `filterWithAI={!searchBarMode}`, so
+the wand only survives on non-bar/embedded surfaces and the v3 traces table).
+
+- **Entry.** The **"Ask AI"** affordance opens AI mode — a plain button placed
+  AFTER the field in DOM order, always available (build from scratch OR refine
+  existing filters). Tab is deliberately NOT a shortcut: while typing it belongs
+  to autocomplete navigation, so forward-tab just moves focus from the field
+  onto the button. `EventsSearchBarRow` owns the `'grammar' | 'ai'` mode and
+  gates availability on `isLangfuseCloud && organization.aiFeaturesEnabled` (the
+  server enforces it too). `SearchComposer` only takes an `onActivateAi` callback
+  - renders the affordance; it stays grammar-only.
+- **The component.** `components/SearchBarAiPrompt.tsx` — a plain NL input (not
+  the contenteditable). Enter generates; Esc or the back arrow exits (no
+  blur-to-exit — leaving is explicit so a stray click never loses your prompt).
+- **The endpoint.** `server/router.ts` (`searchBar.generateFilter`), NOT the
+  legacy `naturalLanguageFilters.createCompletion`. Its prompt is built from
+  THIS registry (`server/buildFilterPrompt.ts`, derived from `FIELDS` +
+  `SCORE_COLUMNS`), so the model's vocabulary IS the grammar. It asks for a flat
+  `FilterState` (an array of `singleFilter`), then **round-trips it through
+  `filterStateToQueryText` server-side and returns only the filters that lower
+  to bar pills** — a hallucinated/non-v4 column lands in `skippedFilters` and is
+  dropped before it reaches the client. A unit test
+  (`__tests__/server/unit/searchBarFilterPrompt.servertest.ts`) asserts every
+  field's prompt-recommended `type` round-trips, so the prompt can't drift from
+  the reverse adapter.
+- **Apply-immediately.** The result is applied via `useEventsSearchBar`'s
+  `applyFilters` (it preserves grammar-less `skippedFilters` like a commit, then
+  writes `setFilterState`), so on returning to grammar mode `resetTo` re-derives
+  the generated filters as editable pills. There is no separate AI→bar sync path.
+- **Refine clears the free-text lane.** When opened with filters present, the
+  bar's full committed text (free text rendered inline) is the refine context
+  sent to the model, which returns the COMPLETE updated `FilterState`. So
+  `applyFilters` also clears `searchQuery` and resets `searchType` to
+  `DEFAULT_SEARCH_TYPE` — anything the model didn't re-emit is dropped, including
+  free text the user asked to remove. Without this, a stale `searchQuery` would
+  survive and `resetTo` would re-derive the dropped text back into the bar.
+
+## Metadata key suggestions (client-side observed map)
+
+The API does not enumerate metadata keys, and backend metadata-structure
+analysis is deferred (until CH26), so `metadata.` completions are fed
+**client-side from rows the user has already loaded**:
+
+- On each fetch, `hooks/useObservedMetadata.ts` samples the visible rows'
+  metadata (same first-30 sampling as the AI-context path), records their
+  **top-level keys** with the observed JSON value type
+  (`lib/metadata-paths.ts`), and unions the result into
+  `store/observedMetadataStore.ts` — persisted to localStorage, **per
+  project** (one global `Record<projectId, …>` map, the globalDateRangeStore
+  shape).
+- `EventsTable` merges the project's map into the observed options where the
+  completion planner already looked (`withMetadataPathOptions`): keys under
+  `metadata` (`keyPathOptions`) and each key's observed values under
+  `metadata.<key>` (the value stage). So typing `metadata.` suggests observed
+  keys with the type as the option detail (`metadata.hej` · `number`), and
+  `metadata.region:` offers the first few observed values (`eu`, `us`, …).
+- **Values are first-observed distinct scalars, skip-don't-truncate.** Only
+  string/number/boolean leaves are collected (object/array stored forms could
+  not round-trip into a matching `=` filter), and a value longer than the cap
+  is dropped entirely — a truncated suggestion would insert a filter that
+  confidently matches nothing.
+- **Top-level keys only, never flattened dot-paths.** Metadata is stored as a
+  flat `Map(String, String)`: nested object values are JSON-encoded strings
+  under their top-level key, and `StringObjectFilter` matches the LITERAL
+  top-level key — a flattened `metadata.scope.name` suggestion would lower to
+  key `scope.name` and match nothing (the metadata view's filter shortcut
+  resolves the top-level key for the same reason). Dotted suggestions still
+  appear whenever producers use dotted top-level keys (the OTel-attribute
+  shape, `gen_ai.request.model`); object-valued keys are suggested with type
+  `object` and their nested content matches via contains
+  (`metadata.scope:*value*`).
+- **Types are display-only.** Metadata filters always lower to `stringObject`
+  (numeric metadata comparisons are rejected by `operatorIssue`); a key
+  observed with more than one type — or only ever `null` — drops its hint
+  instead of showing a wrong one (`mixed` is absorbing).
+- **Bounded on every axis**: 30 sampled rows per fetch, key length ≤ 100
+  chars, ≤ 200 keys per project (first-observed wins), ≤ 5 values per key,
+  value length ≤ 60 chars, ≤ 1024 values per project, ≤ 20 projects
+  (least-recently-updated evicted), plus a persist `version` key that resets
+  the cache on schema change. A no-change merge skips the localStorage write.
+- Accepted caveat: metadata the user has never loaded is never suggested (if
+  they haven't seen it, they don't know it exists either).
 
 ## Extending to other views (the universality contract)
 
@@ -373,17 +464,30 @@ unused planners).
     strips redundant parens and would bail on a now-"invalid" paren) and
     removes documented top-level grouping — needs its own pass.
 - **Layer system**: the bar's in-flow overlays use a hardcoded local ladder (X
-  z-20 < autocomplete popover z-50, both drop into the table below the bar). The
-  **error tooltip is the exception**: when the popover is open it flips ABOVE
-  the bar, into the page header's band, where no in-flow z-index can win —
-  `#page > main` is `overflow:hidden` (clips anything above the bar) and the
-  header is inside the app's isolated stacking context. So that one tooltip
-  renders through the `"tooltip"` `<Layer>` (`components/ui/layer.tsx`), which
-  puts it in a `<body>`-level overlay layer that paints above the whole app by
-  DOM order — no z-index needed. `<Layer>` is the seed of an app-wide layer
-  system (one layer today, ordered by `LAYER_ORDER`). New overlays that must
-  escape clipping/stacking should reuse `<Layer>` rather than a one-off portal +
-  z-index.
+  z-20 < autocomplete popover z-50, both drop into the table below the bar).
+  These are genuinely local — they live inside the app's isolated `#__next`
+  stacking context, can't escape it, and never need to beat a body-level
+  overlay, so their z-index is fine. The **error tooltip is the exception**:
+  when the popover is open it flips ABOVE the bar, into the page header's band,
+  where no in-flow z-index can win — `#page > main` is `overflow:hidden` (clips
+  anything above the bar) and the header is inside the isolated stacking
+  context. So that one tooltip renders through the `"tooltip"` `<Layer>`
+  (`components/ui/layer.tsx`), which puts it in a `<body>`-level overlay layer
+  that paints above the whole app by DOM ORDER — no z-index needed.
+- **The app-wide layer system** (`components/ui/layer.tsx`): `<Layer>` is now
+  part of the full overlay band, not a one-off seed. `LAYER_ORDER` is
+  `["agent", "modal", "popover", "tooltip", "toast"]` — five `<body>`-level
+  layers (declared in `_document.tsx`), each its own isolated stacking context,
+  stacked by DOM ORDER (later = on top), carrying NO z-index of their own. ALL
+  overlays route through it: Radix/Vaul primitives via their `*.Portal`'s
+  `container` (use `useLayerContainer`), and bespoke
+  imperatively-positioned content (like this bar's error tooltip) via `<Layer>`.
+  No overlay carries a magic z-index to "escape to the top" anymore; the
+  `@repo/no-overlay-zindex` lint rule enforces this — it bans high z-index on
+  the `ui/*` overlay wrappers, and app-wide on any overlay _content_ element
+  (e.g. a `*Content` you put a stray `z-50` on). When adding a search-bar
+  overlay that must escape clipping/stacking, reach for `<Layer>` (bespoke) or a
+  layer-routed Radix primitive — never a one-off portal + z-index.
 - Optional: extract `SearchComposer`'s contenteditable selection/`beforeinput`
   machinery into a `useContentEditableController` hook to fully separate the
   imperative integration from the React component.

@@ -7,6 +7,7 @@ import {
   getS3EventStorageClient,
   type IngestionEventType,
   logger,
+  markProjectIngestFailure,
   OtelIngestionProcessor,
   processEventBatch,
   QueueName,
@@ -19,6 +20,8 @@ import {
   traceException,
   compareVersions,
   ResourceSpan,
+  type IngestionAttribution,
+  UNKNOWN_INGESTION_SDK_VALUE,
 } from "@langfuse/shared/src/server";
 import {
   applyIngestionMasking,
@@ -59,7 +62,7 @@ export function checkHeaderBasedDirectWrite(params: {
 }): boolean {
   const { sdkName, sdkVersion, ingestionVersion } = params;
 
-  // Check x-langfuse-ingestion-version (>= 4 means direct write eligible).
+  // Check x-langfuse-ingestion-version.
   // Values > 4 are rejected at the API route, so anything reaching here is valid.
   const parsed = ingestionVersion ? parseInt(ingestionVersion, 10) : NaN;
   if (!isNaN(parsed) && parsed >= 4) {
@@ -208,9 +211,16 @@ export const otelIngestionQueueProcessorBuilder = (
   ): Promise<void> => {
     try {
       const projectId = job.data.payload.authCheck.scope.projectId;
-      const publicKey = job.data.payload.data.publicKey;
+      const publicKey = job.data.payload.data.publicKey ?? "";
       const fileKey = job.data.payload.data.fileKey;
       const auth = job.data.payload.authCheck;
+      const attribution: IngestionAttribution = {
+        ingestionApiKey: publicKey,
+        ingestionSdkName:
+          job.data.payload.sdkName || UNKNOWN_INGESTION_SDK_VALUE,
+        ingestionSdkVersion:
+          job.data.payload.sdkVersion || UNKNOWN_INGESTION_SDK_VALUE,
+      };
 
       const span = getCurrentSpan();
       if (span) {
@@ -299,7 +309,9 @@ export const otelIngestionQueueProcessorBuilder = (
       // Generate events via OtelIngestionProcessor
       const processor = new OtelIngestionProcessor({
         projectId,
-        publicKey,
+        publicKey: attribution.ingestionApiKey,
+        sdkName: attribution.ingestionSdkName,
+        sdkVersion: attribution.ingestionSdkVersion,
       });
       const events: IngestionEventType[] =
         await processor.processToIngestionEvents(parsedSpans);
@@ -435,14 +447,15 @@ export const otelIngestionQueueProcessorBuilder = (
         // Process observations via mergeAndWrite
         const observationWritePromise = Promise.all(
           observations.map((observation) =>
-            ingestionService.mergeAndWrite(
-              getClickhouseEntityType(observation.type),
-              auth.scope.projectId,
-              observation.body.id || "", // id is always defined for observations
-              new Date(), // Use the current timestamp as event time
-              [observation],
-              shouldForwardToEventsTable,
-            ),
+            ingestionService.mergeAndWrite({
+              eventType: getClickhouseEntityType(observation.type),
+              projectId: auth.scope.projectId,
+              entityId: observation.body.id || "", // id is always defined for observations
+              createdAtTimestamp: new Date(), // Use the current timestamp as event time
+              events: [observation],
+              forwardToEventsTable: shouldForwardToEventsTable,
+              attribution,
+            }),
           ),
         );
 
@@ -453,6 +466,7 @@ export const otelIngestionQueueProcessorBuilder = (
             delay: 0,
             source: "otel",
             forwardToEventsTable: shouldForwardToEventsTable,
+            attribution,
           }),
         ]);
       }
@@ -562,6 +576,11 @@ export const otelIngestionQueueProcessorBuilder = (
         });
         return;
       }
+
+      markProjectIngestFailure(job.data.payload.authCheck.scope.projectId, {
+        source: "otel_ingestion_queue",
+        reason: "processing_error",
+      });
 
       logger.error(
         `Failed job otel ingestion processing for ${job.data.payload.authCheck.scope.projectId}`,

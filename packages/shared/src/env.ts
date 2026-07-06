@@ -67,6 +67,7 @@ const EnvSchema = z.object({
     .positive()
     .default(5000),
   REDIS_SENTINEL_ENABLED: z.enum(["true", "false"]).default("false"),
+  REDIS_SENTINEL_TLS_ENABLED: z.enum(["true", "false"]).default("false"),
   REDIS_SENTINEL_NODES: z.string().optional(),
   REDIS_SENTINEL_MASTER_NAME: z.string().optional(),
   REDIS_SENTINEL_USERNAME: z.string().optional(),
@@ -297,6 +298,11 @@ const EnvSchema = z.object({
     .number()
     .positive()
     .default(3600), // 1 hour
+  LANGFUSE_INGEST_FAILURE_PROJECT_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .gt(60)
+    .default(3600), // 1 hour
   LANGFUSE_S3_CORE_DATA_EXPORT_IS_ENABLED: z
     .enum(["true", "false"])
     .default("false"),
@@ -404,14 +410,6 @@ const EnvSchema = z.object({
   SLACK_CLIENT_ID: z.string().optional(),
   SLACK_CLIENT_SECRET: z.string().optional(),
   SLACK_STATE_SECRET: z.string().optional(),
-  SLACK_FETCH_LIMIT: z.coerce
-    .number()
-    .positive()
-    .optional()
-    .default(5_000)
-    .describe(
-      "How many records should be fetched from Slack, before we give up",
-    ),
   SLACK_PAGE_SIZE: z.coerce
     .number()
     .positive()
@@ -432,7 +430,7 @@ const EnvSchema = z.object({
     .number()
     .int()
     .positive()
-    .default(600_000), // 10 minutes
+    .default(3_600_000), // 60 minutes
 
   LANGFUSE_EVENT_PROPAGATION_WORKER_GLOBAL_CONCURRENCY: z.coerce
     .number()
@@ -446,6 +444,7 @@ const EnvSchema = z.object({
     .default(120_000), // 2 minutes
 
   LANGFUSE_AWS_BEDROCK_REGION: z.string().optional(),
+  LANGFUSE_AWS_BEDROCK_SMALL_MODEL: z.string().optional(),
   LANGFUSE_IN_APP_AGENT_AWS_PROFILE: z.string().optional(),
 
   // API Performance Flags
