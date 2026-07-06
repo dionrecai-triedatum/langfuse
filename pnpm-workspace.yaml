@@ -59,6 +59,18 @@ allowBuilds:
   "@datadog/pprof": false
   "@scarf/scarf": false
 overrides:
+  js-yaml@^3.0.0: 3.15.0
+  # Pin only the consumers pulling a vulnerable uuid (CVE-2026-41907); mermaid's
+  # already-safe uuid@14.0.0 is deliberately left alone, since a blanket
+  # `uuid@<11.1.1` rule also catches its `^11.1.0 || ...` range and downgrades it.
+  next-auth>uuid: 11.1.1
+  gaxios>uuid: 11.1.1
+  teeny-request>uuid: 11.1.1
+  oci-common>uuid: 11.1.1
+  "@copilotkit/shared>uuid": 11.1.1
+  "@langchain/langgraph-checkpoint>uuid": 11.1.1
+  "@langchain/langgraph>uuid": 11.1.1
+  "@langchain/langgraph-sdk>uuid": 13.0.1
   brace-expansion@^1.0.0: 1.1.15
   path-to-regexp@^8.0.0: 8.4.0
   undici: 7.28.0
