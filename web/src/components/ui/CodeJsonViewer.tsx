@@ -1,3 +1,4 @@
+/* eslint-disable @repo/no-style-props */
 import { useMemo, useState } from "react";
 import { Button } from "@/src/components/ui/button";
 import {
@@ -20,7 +21,7 @@ import { useMarkdownContext } from "@/src/features/theming/useMarkdownContext";
 import { type MediaReturnType } from "@/src/features/media/validation";
 import { LangfuseMediaView } from "@/src/components/ui/LangfuseMediaView";
 import { classifyMediaValue } from "@/src/components/ui/media/mediaUtils";
-import { JsonMediaTag } from "@/src/components/ui/media/JsonMediaTag";
+import { MediaReferenceTag } from "@/src/components/ui/media/MediaReferenceTag";
 import { MarkdownJsonViewHeader } from "@/src/components/ui/MarkdownJsonView";
 import {
   renderRichPromptContent,
@@ -103,11 +104,9 @@ export function JSONView(props: {
           "io-message-content flex max-w-full min-w-0 gap-2 text-xs wrap-break-word whitespace-pre-wrap",
           props.borderless ? "" : "p-2",
           props.title === "assistant" || props.title === "Output"
-            ? "bg-accent-light-green dark:border-accent-dark-green"
+            ? "bg-accent-light-green dark:border-accent-dark-green/30"
             : "",
-          props.title === "system" || props.title === "Input"
-            ? "bg-primary-foreground"
-            : "",
+          props.title === "system" || props.title === "Input" ? "bg-card" : "",
           props.scrollable || props.borderless ? "" : "rounded-sm border",
           props.codeClassName,
         )}
@@ -124,7 +123,7 @@ export function JSONView(props: {
           </code>
         ) : (
           <div
-            className="max-w-full min-w-0 flex-1 overflow-hidden"
+            className="max-w-full min-w-0 flex-1"
             onClick={() => {
               // If externally collapsed and user clicks to expand, sync the state
               if (props.externalJsonCollapsed && props.onToggleCollapse) {
@@ -155,7 +154,7 @@ export function JSONView(props: {
               customizeNode={({ node }) => {
                 const descriptor = classifyMediaValue(node);
                 return descriptor ? (
-                  <JsonMediaTag descriptor={descriptor} />
+                  <MediaReferenceTag descriptor={descriptor} />
                 ) : undefined;
               }}
               customizeCopy={(node) => stringifyJsonNode(node)}
@@ -300,7 +299,7 @@ export function CodeView(props: {
       <>
         {props.title ? (
           <div className="my-1 flex shrink-0 items-center justify-between pl-1">
-            <div className="text-sm font-medium">{props.title}</div>
+            <div className="text-sm font-bold">{props.title}</div>
             <Button
               variant="ghost"
               size="icon-xs"

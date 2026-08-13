@@ -2,6 +2,8 @@ import { definePreview } from "@storybook/nextjs-vite";
 import addonA11y from "@storybook/addon-a11y";
 import addonDocs from "@storybook/addon-docs";
 import { DocsContainer } from "@storybook/addon-docs/blocks";
+import { GLOBALS_UPDATED, SET_GLOBALS } from "storybook/internal/core-events";
+import { addons } from "storybook/preview-api";
 import { themes } from "storybook/theming";
 import {
   useEffect,
@@ -10,9 +12,11 @@ import {
   type ReactNode,
 } from "react";
 import { TooltipProvider } from "../src/components/ui/tooltip";
+import { ThemeProvider } from "../src/features/theming/ThemeProvider";
 import { MarkdownContextProvider } from "../src/features/theming/useMarkdownContext";
 import { LAYER_ORDER } from "../src/components/ui/layer";
 import "../src/styles/globals.css";
+import "./docs.css";
 // Mirror the global CSS that _app.tsx imports so vendored components
 // (react18-json-view, streamdown markdown) render identically to the app.
 import "react18-json-view/src/style.css";
@@ -20,11 +24,10 @@ import "streamdown/styles.css";
 
 function StorybookThemeProvider({
   children,
-  theme,
   fullHeight,
+  theme,
 }: {
   children?: ReactNode;
-  theme: "light" | "dark";
   /**
    * Give `#__next` a real viewport height so the app's `height: 100%` chains
    * resolve (canvas/story view). In docs view this must be OFF, or every inline
@@ -32,14 +35,31 @@ function StorybookThemeProvider({
    * content. (LFE-10549)
    */
   fullHeight: boolean;
+  theme: "light" | "dark";
 }) {
+  // Overlay layer containers, declared exactly like _document.tsx: a
+  // <div data-overlay-root> holding one <div data-layer={name}/> per
+  // LAYER_ORDER. This is what the layer system (components/ui/layer.tsx)
+  // portals toasts / tooltips / peek into; without it those overlays are
+  // absent in Storybook. Positioning/isolation comes from globals.css.
+  //
+  // Mounted imperatively ON <body>, ONCE — not rendered per decorator:
+  // the docs view runs this decorator for every story block on the page, and
+  // Storybook's preview block carries a CSS transform, which would make it the
+  // containing block for the layers' `position: fixed` — a portaled chart
+  // tooltip would paint relative to the first story block instead of the
+  // viewport (i.e. offscreen). On <body> it behaves exactly like the app.
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-
-    return () => {
-      document.documentElement.classList.remove("dark");
-    };
-  }, [theme]);
+    if (document.querySelector("[data-overlay-root]")) return;
+    const root = document.createElement("div");
+    root.setAttribute("data-overlay-root", "");
+    for (const name of LAYER_ORDER) {
+      const layer = document.createElement("div");
+      layer.setAttribute("data-layer", name);
+      root.appendChild(layer);
+    }
+    document.body.appendChild(root);
+  }, []);
 
   // Reproduce the app's DOM scaffold so the layout rules in globals.css that are
   // scoped to `div#__next` / `div#__next > div` (height: 100%) and
@@ -49,7 +69,12 @@ function StorybookThemeProvider({
   // _app.tsx). `#__next` is given a real viewport height so the `height: 100%`
   // chain has something to resolve against.
   return (
-    <>
+    <ThemeProvider
+      attribute="class"
+      forcedTheme={theme}
+      enableSystem={false}
+      disableTransitionOnChange
+    >
       <div
         id="__next"
         className="bg-background text-foreground"
@@ -57,29 +82,25 @@ function StorybookThemeProvider({
       >
         <div>{children}</div>
       </div>
-      {/* Overlay layer containers, declared exactly like _document.tsx: a
-          <div data-overlay-root> sibling AFTER #__next (so it paints on top by
-          DOM order), holding one <div data-layer={name}/> per LAYER_ORDER. This
-          is what the layer system (components/ui/layer.tsx) portals toasts /
-          tooltips / peek into; without it those overlays are absent in
-          Storybook. Positioning/isolation comes from globals.css. */}
-      <div data-overlay-root>
-        {LAYER_ORDER.map((name) => (
-          <div key={name} data-layer={name} />
-        ))}
-      </div>
-    </>
+    </ThemeProvider>
   );
 }
+
+const syncTheme = ({ globals }: { globals?: { theme?: unknown } }) => {
+  document.documentElement.classList.toggle("dark", globals?.theme === "dark");
+};
+
+const channel = addons.getChannel();
+channel.on(SET_GLOBALS, syncTheme);
+channel.on(GLOBALS_UPDATED, syncTheme);
 
 /**
  * Docs/guide pages render outside the story decorator, so they don't get our
  * theme — Storybook's own docs theme is light and makes prose unreadable in
  * dark mode (and the page stays white). This container switches Storybook's
- * docs theme to match the app's `.dark` class (which the story decorators
- * toggle on <html>), so every guide's prose, chrome, and example cards follow
- * the theme. It also bumps the base type — the default docs body is too small.
- * (LFE-10549)
+ * docs theme to match the app's `.dark` class (which the global theme listener
+ * toggles on <html>), so every guide's prose, chrome, and example cards follow
+ * the theme. (LFE-10549)
  */
 function ThemedDocsContainer({
   context,
@@ -100,58 +121,6 @@ function ThemedDocsContainer({
 
   return (
     <DocsContainer context={context} theme={dark ? themes.dark : themes.light}>
-      <style>{`
-        .sbdocs-wrapper {
-          background: hsl(var(--background));
-          color: hsl(var(--foreground));
-          padding: 0;
-        }
-
-        .sbdocs-content {
-          max-width: 56rem;
-          padding: 3.5rem 2rem;
-          color: hsl(var(--foreground));
-        }
-
-        .sbdocs-content a {
-          color: hsl(var(--primary));
-        }
-
-        .sbdocs-content code {
-          background: hsl(var(--muted));
-          border-radius: 0.25rem;
-          padding: 0.125rem 0.375rem;
-        }
-
-        .sbdocs-content pre {
-          background: hsl(var(--muted));
-          border: 1px solid hsl(var(--border));
-          border-radius: 0.5rem;
-          color: hsl(var(--foreground));
-        }
-
-        .sbdocs-content pre code {
-          background: transparent;
-          padding: 0;
-        }
-
-        .sbdocs-content blockquote {
-          border-left: 3px solid hsl(var(--border));
-          color: hsl(var(--muted-foreground));
-          margin-left: 0;
-          padding-left: 1rem;
-        }
-
-        .sbdocs-content hr {
-          border-color: hsl(var(--border));
-        }
-
-        .sbdocs-content .sbdocs.sbdocs-preview {
-          background: transparent;
-          border: 1px solid hsl(var(--border));
-          box-shadow: none;
-        }
-      `}</style>
       {children}
     </DocsContainer>
   );
@@ -180,26 +149,22 @@ export default definePreview({
     theme: "light",
   },
   decorators: [
-    (Story, context) => {
-      const theme = context.globals.theme === "dark" ? "dark" : "light";
-
-      return (
-        <StorybookThemeProvider
-          theme={theme}
-          fullHeight={context.viewMode !== "docs"}
-        >
-          {/* MarkdownContextProvider mirrors the app: pages render inside it so
+    (Story, context) => (
+      <StorybookThemeProvider
+        fullHeight={context.viewMode !== "docs"}
+        theme={context.globals.theme === "dark" ? "dark" : "light"}
+      >
+        {/* MarkdownContextProvider mirrors the app: pages render inside it so
               the JSON/IO viewers (CodeJsonViewer's JSONView calls
               useMarkdownContext) work identically to production. Without it,
               multi-line IOTableCell renders (rowHeight m/l) throw. */}
-          <MarkdownContextProvider>
-            <TooltipProvider>
-              <Story />
-            </TooltipProvider>
-          </MarkdownContextProvider>
-        </StorybookThemeProvider>
-      );
-    },
+        <MarkdownContextProvider>
+          <TooltipProvider>
+            <Story />
+          </TooltipProvider>
+        </MarkdownContextProvider>
+      </StorybookThemeProvider>
+    ),
   ],
   parameters: {
     a11y: {
@@ -207,6 +172,11 @@ export default definePreview({
     },
     docs: {
       container: ThemedDocsContainer,
+    },
+    options: {
+      storySort: {
+        order: ["Design", "Playground"],
+      },
     },
   },
 });

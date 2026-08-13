@@ -10,7 +10,7 @@ import { z } from "zod";
 import { defineTool } from "../../../core/define-tool";
 import { ParamPromptName, ParamNewLabels } from "../validation";
 import { updatePromptLabelsForApi } from "@/src/features/prompts/server/prompt-api-service";
-import { buildPromptUrl } from "@/src/utils/product-url";
+import { buildPromptUrl } from "@langfuse/shared/src/server";
 import { runMcpTool } from "../../../core/run-mcp-tool";
 
 import { PROMPT_NAME_MAX_LENGTH } from "@langfuse/shared";
@@ -64,6 +64,7 @@ export const [updatePromptLabelsTool, handleUpdatePromptLabels] = defineTool({
     "- Specified labels are added to the version (preserving others not mentioned)",
     "- Labels are unique across versions - setting a label on one version automatically removes it from others",
     "- 'latest' label is auto-managed and cannot be set manually",
+    "- Only add the 'production' label when the user explicitly asks to promote this prompt version to production",
     "- Cannot modify prompt content, type, or tags - use createTextPrompt or createChatPrompt for new versions",
     "",
     "Accepts: name, version (required), newLabels (array, can be empty to remove all labels)",

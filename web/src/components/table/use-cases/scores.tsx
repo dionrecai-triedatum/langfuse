@@ -22,19 +22,12 @@ import {
 import { usePeekTableState } from "@/src/components/table/peek/contexts/PeekTableStateContext";
 import {
   getScoreFilterConfig,
+  observationScopeFilter,
   SCORE_COLUMN_TO_BACKEND_KEY,
   type ScoresTableHiddenColumn,
 } from "@/src/features/filters/config/scores-config";
-import { DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG } from "@/src/features/filters/constants/internal-environments";
-import { transformFiltersForBackend } from "@/src/features/filters/lib/filter-transform";
-import { isNumericDataType } from "@/src/features/scores/lib/helpers";
-import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
-import { useTableDateRange } from "@/src/hooks/useTableDateRange";
-import { toAbsoluteTimeRange } from "@/src/utils/date-range-utils";
-import { api } from "@/src/utils/api";
-
-import type { RouterOutput } from "@/src/utils/types";
 import {
+  DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG,
   isPresent,
   type FilterState,
   type ScoreDataTypeType,
@@ -44,6 +37,16 @@ import {
   TableViewPresetTableName,
   type TimeFilter,
 } from "@langfuse/shared";
+import { transformFiltersForBackend } from "@/src/features/filters/lib/filter-transform";
+import { sortOptionValues } from "@/src/features/filters/lib/option-sort";
+import { isNumericDataType } from "@/src/features/scores/lib/helpers";
+import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
+import { useTableDateRange } from "@/src/hooks/useTableDateRange";
+import { toAbsoluteTimeRange } from "@/src/utils/date-range-utils";
+import { api } from "@/src/utils/api";
+import { TableHeaderControls } from "@/src/components/table/table-header-controls";
+
+import type { RouterOutput } from "@/src/utils/types";
 import TagList from "@/src/features/tag/components/TagList";
 import { cn } from "@/src/utils/tailwind";
 import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
@@ -62,14 +65,22 @@ import { useTableViewManager } from "@/src/components/table/table-view-presets/h
 import TableIdOrName from "@/src/components/table/table-id";
 import { usePaginationState } from "@/src/hooks/usePaginationState";
 import { useV4Beta } from "@/src/features/events/hooks/useV4Beta";
+import {
+  ScoreTag,
+  scoreLevelFromScore,
+  type ScoreLevel,
+} from "@/src/components/score-tag";
 
 export type ScoresTableRow = {
   id: string;
   traceId?: string;
   sessionId?: string;
+  datasetRunId?: string;
   timestamp: Date;
   source: string;
   name: string;
+  /** Derived from the score's context ids (scoreLevelFromScore). */
+  level: ScoreLevel;
   dataType: ScoreDataTypeType;
   value: string;
   author: {
@@ -93,13 +104,22 @@ export type ScoresTableProps = {
   userId?: string;
   traceId?: string;
   observationId?: string;
+  /**
+   * Widen the `observationId` scope to also list the trace's trace-level scores
+   * (no `observationId`). Set when the observation stands in for the trace — the
+   * top-level span of a v4 trace, which carries them on its badge too.
+   */
+  includeTraceLevelScores?: boolean;
   hiddenColumns?: ScoresTableHiddenColumn[];
   localStorageSuffix?: string;
   disableUrlPersistence?: boolean;
-  /** Hide the toolbar time-range picker. Set by pages that render the picker
-   *  in the page header (TableTimeRangeHeaderPicker) — both read the same
-   *  shared per-project range, so embedded usages keep the toolbar picker. */
-  hideTimeRangePicker?: boolean;
+  /**
+   * When true, render the time-range picker and auto-refresh button in the
+   * page header (next to the title) via the header controls slot, instead of
+   * inside the table toolbar. Only used when the table is the primary content
+   * of a `Page`.
+   */
+  showControlsInPageHeader?: boolean;
 };
 
 function createFilterState(
@@ -123,10 +143,11 @@ export default function ScoresTable({
   userId,
   traceId,
   observationId,
+  includeTraceLevelScores = false,
   hiddenColumns = [],
   localStorageSuffix = "",
   disableUrlPersistence = false,
-  hideTimeRangePicker = false,
+  showControlsInPageHeader = false,
 }: ScoresTableProps) {
   const peekContext = usePeekTableState();
 
@@ -177,6 +198,13 @@ export default function ScoresTable({
           : []),
       ]
     : [];
+
+  // Scoped to a single trace (trace/observation detail): a time window can only
+  // hide that trace's own scores — the trace id already bounds the query — so the
+  // rows are unwindowed and the picker is not offered. The window still bounds the
+  // filter-option queries, which are project-wide either way.
+  const isTraceScoped = Boolean(traceId);
+  const rowDateRangeFilter: FilterState = isTraceScoped ? [] : dateRangeFilter;
 
   const environmentFilterOptions =
     api.projects.environmentFilterOptions.useQuery(
@@ -306,6 +334,7 @@ export default function ScoresTable({
           value: sv.value,
           count: sv.count !== undefined ? Number(sv.count) : undefined,
         })) ?? undefined,
+      booleanValue: filterOptions.data?.booleanValue ?? undefined,
       traceName:
         filterOptions.data?.traceName?.map((tn) => ({
           value: tn.value,
@@ -316,7 +345,8 @@ export default function ScoresTable({
           value: u.value,
           count: u.count !== undefined ? Number(u.count) : undefined,
         })) ?? undefined,
-      tags: filterOptions.data?.tags?.map((t) => t.value) ?? undefined, // tags don't have counts
+      // tags don't have counts; they read A→Z
+      tags: sortOptionValues(filterOptions.data?.tags?.map((t) => t.value)),
       environment: environmentOptions,
     }),
     [filterOptions.data, environmentOptions],
@@ -369,13 +399,13 @@ export default function ScoresTable({
   );
 
   const filterState = createFilterState(
-    queryFilter.effectiveFilterState.concat(dateRangeFilter),
+    queryFilter.effectiveFilterState.concat(
+      rowDateRangeFilter,
+      observationScopeFilter(observationId, includeTraceLevelScores),
+    ),
     [
       ...(userId ? [{ key: "User ID", value: userId }] : []),
       ...(traceId ? [{ key: "Trace ID", value: traceId }] : []),
-      ...(observationId
-        ? [{ key: "Observation ID", value: observationId }]
-        : []),
     ],
   );
 
@@ -634,6 +664,22 @@ export default function ScoresTable({
       size: 150,
     },
     {
+      accessorKey: "level",
+      header: "Level",
+      id: "level",
+      enableHiding: true,
+      // Derived client-side from the score's context ids — not a sortable
+      // backend column.
+      enableSorting: false,
+      size: 110,
+      cell: ({ row }) => {
+        // Level tag (LFE-10596): trace- vs observation- (vs session-) level
+        // scores look identical here otherwise.
+        const level: ScoresTableRow["level"] = row.getValue("level");
+        return <ScoreTag level={level} />;
+      },
+    },
+    {
       accessorKey: "dataType",
       header: "Data Type",
       id: "dataType",
@@ -815,6 +861,7 @@ export default function ScoresTable({
       timestamp: score.timestamp,
       source: score.source,
       name: score.name,
+      level: scoreLevelFromScore(score),
       dataType: score.dataType,
       value:
         isNumericDataType(score.dataType) && isPresent(score.value)
@@ -830,6 +877,7 @@ export default function ScoresTable({
       comment: score.comment ?? undefined,
       observationId: score.observationId ?? undefined,
       sessionId: score.sessionId ?? undefined,
+      datasetRunId: score.datasetRunId ?? undefined,
       traceId: score.traceId ?? undefined,
       traceName: score.traceName ?? undefined,
       userId: score.traceUserId ?? undefined,
@@ -860,6 +908,7 @@ export default function ScoresTable({
         timestamp: score.timestamp,
         source: score.source,
         name: score.name,
+        level: scoreLevelFromScore(score),
         dataType: score.dataType,
         value:
           isNumericDataType(score.dataType) && isPresent(score.value)
@@ -875,6 +924,7 @@ export default function ScoresTable({
         comment: score.comment ?? undefined,
         observationId: score.observationId ?? undefined,
         sessionId: score.sessionId ?? undefined,
+        datasetRunId: score.datasetRunId ?? undefined,
         traceId: score.traceId ?? undefined,
         traceName: meta?.traceName ?? undefined,
         userId: meta?.userId ?? undefined,
@@ -926,6 +976,12 @@ export default function ScoresTable({
       defaultSidebarCollapsed={scoresFilterConfig.defaultSidebarCollapsed}
     >
       <div className="flex h-full w-full flex-col">
+        {showControlsInPageHeader && (
+          <TableHeaderControls
+            timeRange={timeRange}
+            setTimeRange={setTimeRange}
+          />
+        )}
         {/* Toolbar spanning full width */}
         <DataTableToolbar
           columns={columns}
@@ -961,8 +1017,12 @@ export default function ScoresTable({
           ]}
           rowHeight={rowHeight}
           setRowHeight={setRowHeight}
-          timeRange={hideTimeRangePicker ? undefined : timeRange}
-          setTimeRange={hideTimeRangePicker ? undefined : setTimeRange}
+          timeRange={
+            showControlsInPageHeader || isTraceScoped ? undefined : timeRange
+          }
+          setTimeRange={
+            showControlsInPageHeader || isTraceScoped ? undefined : setTimeRange
+          }
           multiSelect={{
             selectAll,
             setSelectAll,

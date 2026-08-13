@@ -24,9 +24,9 @@ import {
   SESSION_COLUMN_TO_BACKEND_KEY,
   type SessionOmittableFilterColumn,
 } from "@/src/features/filters/config/sessions-config";
-import { DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG } from "@/src/features/filters/constants/internal-environments";
-import { transformFiltersForBackend } from "@/src/features/filters/lib/filter-transform";
+import { buildSidebarFilterSessionContextId } from "@/src/features/filters/lib/persistedSidebarFilterQuery";
 import {
+  DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG,
   type FilterState,
   BatchExportTableName,
   TableViewPresetTableName,
@@ -34,7 +34,10 @@ import {
   BatchActionType,
   ActionId,
   type TimeFilter,
+  type ScoreAggregate,
 } from "@langfuse/shared";
+import { transformFiltersForBackend } from "@/src/features/filters/lib/filter-transform";
+import { sortOptionValues } from "@/src/features/filters/lib/option-sort";
 import { useDetailPageLists } from "@/src/features/navigate-detail-pages/context";
 import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
 import { api } from "@/src/utils/api";
@@ -49,12 +52,12 @@ import { toAbsoluteTimeRange } from "@/src/utils/date-range-utils";
 import { joinSessionCoreAndMetrics } from "@/src/components/table/use-cases/session-row-data";
 import TagList from "@/src/features/tag/components/TagList";
 import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
+import { TableHeaderControls } from "@/src/components/table/table-header-controls";
 import { cn } from "@/src/utils/tailwind";
 import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
 import { LocalIsoDate } from "@/src/components/LocalIsoDate";
 import { useTableViewManager } from "@/src/components/table/table-view-presets/hooks/useTableViewManager";
 import { Badge } from "@/src/components/ui/badge";
-import { type ScoreAggregate } from "@langfuse/shared";
 import { useSelectAll } from "@/src/features/table/hooks/useSelectAll";
 import { type TableAction } from "@/src/features/table/types";
 import { TableActionMenu } from "@/src/features/table/components/TableActionMenu";
@@ -88,10 +91,13 @@ export type SessionTableProps = {
   userId?: string;
   omittedFilter?: SessionOmittableFilterColumn[];
   isBetaEnabled?: boolean;
-  /** Hide the toolbar time-range picker. Set by pages that render the picker
-   *  in the page header (TableTimeRangeHeaderPicker) — both read the same
-   *  shared per-project range, so embedded usages keep the toolbar picker. */
-  hideTimeRangePicker?: boolean;
+  /**
+   * When true, render the time-range picker and auto-refresh button in the
+   * page header (next to the title) via the header controls slot, instead of
+   * inside the table toolbar. Only used when the table is the primary content
+   * of a `Page`.
+   */
+  showControlsInPageHeader?: boolean;
 };
 
 export default function SessionsTable({
@@ -99,11 +105,11 @@ export default function SessionsTable({
   userId,
   omittedFilter = [],
   isBetaEnabled = false,
-  hideTimeRangePicker = false,
+  showControlsInPageHeader = false,
 }: SessionTableProps) {
   const sessionsFilterConfig = useMemo(
-    () => getSessionFilterConfig(omittedFilter),
-    [omittedFilter],
+    () => getSessionFilterConfig(omittedFilter, isBetaEnabled),
+    [isBetaEnabled, omittedFilter],
   );
   const { setDetailPageList } = useDetailPageLists();
   const { timeRange, setTimeRange } = useTableDateRange(projectId);
@@ -232,6 +238,7 @@ export default function SessionsTable({
       ) ?? undefined;
 
     const scoresNumeric = filterOptions.data?.scores_avg ?? undefined;
+    const scoresBoolean = filterOptions.data?.score_booleans ?? undefined;
 
     return {
       bookmarked: ["Bookmarked", "Not bookmarked"],
@@ -241,7 +248,8 @@ export default function SessionsTable({
           value: u.value,
           count: Number(u.count),
         })) ?? undefined,
-      tags: filterOptions.data?.tags.map((t) => t.value) ?? undefined, // tags don't have counts
+      // tags don't have counts; they read A→Z
+      tags: sortOptionValues(filterOptions.data?.tags.map((t) => t.value)),
       sessionDuration: [],
       countTraces: [],
       inputTokens: [],
@@ -252,6 +260,7 @@ export default function SessionsTable({
       totalCost: [],
       score_categories: scoreCategories,
       scores_avg: scoresNumeric,
+      score_booleans: scoresBoolean,
     };
   }, [environmentOptions, filterOptions.data]);
 
@@ -262,11 +271,15 @@ export default function SessionsTable({
     () => ({
       loading: isSidebarFilterLoading,
       stateLocation: "urlAndSessionStorage",
-      sessionFilterContextId: projectId,
+      sessionFilterContextId: buildSidebarFilterSessionContextId(
+        projectId,
+        userId ? "user" : undefined,
+      ),
       // Sidebar-only implicit environment defaults
       implicitDefaultConfig: DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG,
+      isV4: isBetaEnabled,
     }),
-    [isSidebarFilterLoading, projectId],
+    [isBetaEnabled, isSidebarFilterLoading, projectId, userId],
   );
 
   const queryFilter = useSidebarFilterState(
@@ -819,6 +832,12 @@ export default function SessionsTable({
   return (
     <DataTableControlsProvider tableName={sessionsFilterConfig.tableName}>
       <div className="flex h-full w-full flex-col">
+        {showControlsInPageHeader && (
+          <TableHeaderControls
+            timeRange={timeRange}
+            setTimeRange={setTimeRange}
+          />
+        )}
         {/* Toolbar spanning full width */}
         <DataTableToolbar
           filterState={queryFilter.explicitFilterState}
@@ -856,8 +875,8 @@ export default function SessionsTable({
             projectId,
             controllers: viewControllers,
           }}
-          timeRange={hideTimeRangePicker ? undefined : timeRange}
-          setTimeRange={hideTimeRangePicker ? undefined : setTimeRange}
+          timeRange={showControlsInPageHeader ? undefined : timeRange}
+          setTimeRange={showControlsInPageHeader ? undefined : setTimeRange}
           columnsWithCustomSelect={["userIds"]}
           rowHeight={rowHeight}
           setRowHeight={setRowHeight}

@@ -7,11 +7,11 @@ RUN apk update && apk upgrade --no-cache libcrypto3 libssl3 libc6-compat busybox
 
 FROM --platform=${TARGETPLATFORM:-linux/amd64} alpine AS build-base
 # Pin turbo to avoid nondeterministic prune output from future patch releases.
-RUN npm install turbo@2.9.18 --global
+RUN npm install turbo@2.10.5 --global
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
-RUN corepack prepare pnpm@11.4.0 --activate
+RUN corepack prepare pnpm@11.10.0 --activate
 
 FROM --platform=${TARGETPLATFORM:-linux/amd64} alpine AS runtime-base
 # Remove build-only package managers. npm stays here because the runner stage
@@ -20,7 +20,7 @@ RUN rm -rf /usr/local/lib/node_modules/corepack \
             /root/.cache/node/corepack && \
     rm -f /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
-FROM --platform=${BUILDPLATFORM} golang:1.26 AS migrate-builder
+FROM --platform=${BUILDPLATFORM} golang:1.26.5 AS migrate-builder
 ARG TARGETOS
 ARG TARGETARCH
 ENV CGO_ENABLED=0 \
@@ -52,6 +52,13 @@ COPY --from=pruner /app/out/json/ .
 
 RUN pnpm install --frozen-lockfile
 
+# pnpm 11 defaults verify-deps-before-run to "install", so every `pnpm run`
+# spawned by turbo re-checks node_modules via file mtimes. Cached install
+# layers make those mtimes look stale, and the concurrent auto-installs race
+# in the hoisting step (ENOENT unlink in node_modules/.pnpm/node_modules).
+# The frozen-lockfile install above is authoritative; skip the check.
+ENV pnpm_config_verify_deps_before_run=false
+
 ENV DOCKER_BUILD 1
 ENV NEXT_MANUAL_SIG_HANDLE true
 
@@ -71,6 +78,14 @@ ARG NEXT_PUBLIC_DEMO_PROJECT_ID
 ENV NEXT_PUBLIC_DEMO_PROJECT_ID=$NEXT_PUBLIC_DEMO_PROJECT_ID
 ARG NEXT_PUBLIC_SIGN_UP_DISABLED
 ENV NEXT_PUBLIC_SIGN_UP_DISABLED=$NEXT_PUBLIC_SIGN_UP_DISABLED
+ARG NEXT_PUBLIC_PREVIEW_PR_URL
+ENV NEXT_PUBLIC_PREVIEW_PR_URL=$NEXT_PUBLIC_PREVIEW_PR_URL
+ARG NEXT_PUBLIC_PREVIEW_PR_AUTHOR
+ENV NEXT_PUBLIC_PREVIEW_PR_AUTHOR=$NEXT_PUBLIC_PREVIEW_PR_AUTHOR
+ARG NEXT_PUBLIC_PREVIEW_LAST_UPDATED
+ENV NEXT_PUBLIC_PREVIEW_LAST_UPDATED=$NEXT_PUBLIC_PREVIEW_LAST_UPDATED
+ARG NEXT_PUBLIC_PREVIEW_DEMO_AUTO_SIGN_IN
+ENV NEXT_PUBLIC_PREVIEW_DEMO_AUTO_SIGN_IN=$NEXT_PUBLIC_PREVIEW_DEMO_AUTO_SIGN_IN
 ARG NEXT_PUBLIC_POSTHOG_KEY
 ENV NEXT_PUBLIC_POSTHOG_KEY=$NEXT_PUBLIC_POSTHOG_KEY
 ARG NEXT_PUBLIC_POSTHOG_HOST
@@ -83,6 +98,8 @@ ARG NEXT_PUBLIC_SENTRY_DSN
 ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
 ARG NEXT_PUBLIC_BASE_PATH
 ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
+ARG NEXT_PUBLIC_LANGFUSE_MARKDOWN_RENDER_CHARACTER_LIMIT
+ENV NEXT_PUBLIC_LANGFUSE_MARKDOWN_RENDER_CHARACTER_LIMIT=$NEXT_PUBLIC_LANGFUSE_MARKDOWN_RENDER_CHARACTER_LIMIT
 
 # Sentry already needs to be set on build time to upload sourcemaps
 # This must not be set for OSS releases as we would share our Sentry secret.
