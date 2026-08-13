@@ -83,9 +83,10 @@ overrides:
   # CVE-2026-71848/-69207/-71850/-71849, pulled in via
   # @modelcontextprotocol/sdk (peer range hono ^4.8.3, compatible).
   hono: 4.12.34
-  # GHSA-frvp-7c67-39w9 path traversal; 2.0.5's only peer requirement is
-  # hono ^4, compatible with the pin above.
-  "@hono/node-server": 2.0.5
+  # GHSA-frvp-7c67-39w9 path traversal (fixed 2.0.5) and GHSA-9mqv-5hh9-4cgg
+  # memory leak (fixed 2.0.10); 2.0.12's only peer requirement is hono ^4,
+  # compatible with the pin above.
+  "@hono/node-server": 2.0.12
   # Fixes CVE-2026-59892 (JaegerPropagator DoS); 2.9.0 also aligns with the
   # ^2.9.0 other @opentelemetry packages already require in package.json.
   "@opentelemetry/core@^2.0.0": 2.9.0
