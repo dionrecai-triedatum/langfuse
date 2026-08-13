@@ -60,7 +60,10 @@ allowBuilds:
   cpu-features: true
   ssh2: true
 overrides:
-  js-yaml@^3.0.0: 3.15.0
+  # CVE-2026-59870/GHSA-5p4m: quadratic CPU consumption in !!omap resolution,
+  # affects both the 3.x and 4.x lines.
+  js-yaml@^3.0.0: 3.15.1
+  js-yaml@^4.0.0: 4.3.1
   # Pin only the consumers pulling a vulnerable uuid (CVE-2026-41907); mermaid's
   # already-safe uuid@14.0.0 is deliberately left alone, since a blanket
   # `uuid@<11.1.1` rule also catches its `^11.1.0 || ...` range and downgrades it.
@@ -69,12 +72,20 @@ overrides:
   teeny-request>uuid: 11.1.1
   oci-common>uuid: 11.1.1
   "@copilotkit/shared>uuid": 11.1.1
+  "@copilotkit/runtime>uuid": 11.1.1
+  dockerode>uuid: 11.1.1
   "@langchain/langgraph-checkpoint>uuid": 11.1.1
   "@langchain/langgraph>uuid": 11.1.1
   "@langchain/langgraph-sdk>uuid": 13.0.1
   brace-expansion@^1.0.0: 1.1.15
   path-to-regexp@^8.0.0: 8.4.0
   undici: 7.29.0
+  # CVE-2026-71848/-69207/-71850/-71849, pulled in via
+  # @modelcontextprotocol/sdk (peer range hono ^4.8.3, compatible).
+  hono: 4.12.34
+  # GHSA-frvp-7c67-39w9 path traversal; 2.0.5's only peer requirement is
+  # hono ^4, compatible with the pin above.
+  "@hono/node-server": 2.0.5
   # Fixes CVE-2026-59892 (JaegerPropagator DoS); 2.9.0 also aligns with the
   # ^2.9.0 other @opentelemetry packages already require in package.json.
   "@opentelemetry/core@^2.0.0": 2.9.0
