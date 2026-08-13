@@ -25,7 +25,9 @@ describe("project API keys trpc", () => {
     });
   });
 
-  async function createProjectCaller() {
+  async function createProjectCaller(
+    projectRole: "ADMIN" | "MEMBER" = "ADMIN",
+  ) {
     const { projectId, orgId } = await createOrgProjectAndApiKey();
 
     const session: Session = {
@@ -42,27 +44,36 @@ describe("project API keys trpc", () => {
             plan: "cloud:hobby",
             cloudConfig: undefined,
             metadata: {},
+            aiFeaturesEnabled: false,
+            aiTelemetryEnabled: true,
             projects: [
               {
                 id: projectId,
-                role: "ADMIN",
+                role: projectRole,
                 retentionDays: 30,
                 deletedAt: null,
+                hasTraces: false,
                 name: "Test Project",
+                metadata: {},
+                createdAt: new Date().toISOString(),
               },
             ],
           },
         ],
         featureFlags: {
+          searchBar: false,
           excludeClickhouseRead: false,
           templateFlag: true,
+          v4BetaToggleVisible: false,
+          observationEvals: false,
+          experimentsV4Enabled: false,
         },
         admin: false,
       },
       environment: {} as any,
     };
 
-    const ctx = createInnerTRPCContext({ session });
+    const ctx = createInnerTRPCContext({ session, headers: {} });
     const caller = appRouter.createCaller({ ...ctx, prisma });
 
     return { caller, projectId };
@@ -103,11 +114,31 @@ describe("project API keys trpc", () => {
       });
       expect(dbKey.createdByUserId).toBe("user-1");
       expect(dbKey.createdByApiKeyId).toBeNull();
+      expect(dbKey.scope).toBe("PROJECT");
+      expect(dbKey.projectId).toBe(projectId);
+      expect(dbKey.orgId).toBeNull();
 
       const apiKeys = await caller.projectApiKeys.byProjectId({ projectId });
       const listedKey = apiKeys.find((key) => key.id === apiKeyResult.id);
       expect(listedKey?.createdByUser?.id).toBe("user-1");
       expect(listedKey?.createdByApiKey).toBeNull();
+    });
+
+    it("rejects users without apiKeys:CUD access", async () => {
+      const { caller, projectId } = await createProjectCaller("MEMBER");
+
+      await expect(
+        caller.projectApiKeys.create({
+          projectId,
+          note: "Unauthorized migration key",
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+      await expect(
+        prisma.apiKey.count({
+          where: { projectId, note: "Unauthorized migration key" },
+        }),
+      ).resolves.toBe(0);
     });
   });
 

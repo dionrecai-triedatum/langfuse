@@ -10,6 +10,14 @@ vi.mock("@/src/server/auth", () => ({
 
 const sharedServerMock = vi.hoisted(() => ({
   queryClickhouse: vi.fn(),
+  isForceV3ExperienceProject: vi.fn(() => false),
+  logger: {
+    warn: vi.fn(),
+  },
+  INTERNAL_INGESTION_SDK_NAMES: [
+    "langfuse-internal-ai-sdk",
+    "langfuse-internal-otel-writer",
+  ],
   convertDateToClickhouseDateTime: (date: Date) =>
     date.toISOString().replace("T", " ").replace("Z", ""),
   systemTableRef: (table: "system.processes" | "system.query_log") =>
@@ -74,6 +82,21 @@ const sharedServerMock = vi.hoisted(() => ({
       status: major >= latestMajor ? "current" : "outdated_major",
     };
   },
+  classifyIngestionSdkAttribution: ({
+    sdkName,
+    sdkVersion,
+  }: {
+    sdkName: string | null | undefined;
+    sdkVersion: string | null | undefined;
+  }) => {
+    const missingName = !sdkName || sdkName === "unknown";
+    const missingVersion = !sdkVersion || sdkVersion === "unknown";
+
+    if (missingName && missingVersion) return "missing_name_and_version";
+    if (missingName) return "missing_name";
+    if (missingVersion) return "missing_version";
+    return "attributed";
+  },
 }));
 
 vi.mock("@langfuse/shared/src/server", async () => {
@@ -113,26 +136,35 @@ const projectId = "project-v4-transition";
 const orgId = "org-v4-transition";
 const secondProjectId = "project-v4-transition-second";
 
+// Mocked Prisma delegates only implement the methods a test exercises, so
+// accept any subset of PrismaClient keys with loosely typed values.
+type MockPrismaClient = Partial<Record<keyof PrismaClient, unknown>>;
+
 const createCaller = (
-  prisma?: Partial<PrismaClient>,
+  prisma?: MockPrismaClient,
   callerSession: Session = session,
 ) =>
   v4TransitionRouter.createCaller({
     ...createInnerTRPCContext({ session: callerSession, headers: {} }),
-    ...(prisma ? { prisma: prisma as PrismaClient } : {}),
+    ...(prisma ? { prisma: prisma as unknown as PrismaClient } : {}),
   });
 
-type OrganizationRole = Session["user"]["organizations"][number]["role"];
+type SessionUser = NonNullable<Session["user"]>;
+type OrganizationRole = SessionUser["organizations"][number]["role"];
 type ProjectRole =
-  Session["user"]["organizations"][number]["projects"][number]["role"];
+  SessionUser["organizations"][number]["projects"][number]["role"];
 
 const createSessionWithOrgRole = (role: OrganizationRole): Session => ({
   ...session,
   user: {
-    ...session.user,
-    organizations: session.user.organizations.map((organization) => ({
+    ...session.user!,
+    organizations: session.user!.organizations.map((organization) => ({
       ...organization,
       role,
+      projects:
+        role === "NONE"
+          ? organization.projects.filter((project) => project.id === projectId)
+          : organization.projects,
     })),
   },
 });
@@ -140,8 +172,8 @@ const createSessionWithOrgRole = (role: OrganizationRole): Session => ({
 const createSessionWithProjectRole = (role: ProjectRole): Session => ({
   ...session,
   user: {
-    ...session.user,
-    organizations: session.user.organizations.map((organization) => ({
+    ...session.user!,
+    organizations: session.user!.organizations.map((organization) => ({
       ...organization,
       projects: organization.projects.map((project) => ({
         ...project,
@@ -179,6 +211,16 @@ const session: Session = {
             metadata: {},
             createdAt: new Date(0).toISOString(),
           },
+          {
+            id: secondProjectId,
+            name: "Second Project",
+            role: "ADMIN",
+            deletedAt: null,
+            retentionDays: null,
+            hasTraces: false,
+            metadata: {},
+            createdAt: new Date(0).toISOString(),
+          },
         ],
       },
     ],
@@ -205,6 +247,7 @@ describe("v4TransitionRouter", () => {
         time: "2026-06-24T12:00:00Z",
         entrypoint: "publicapi: GET /api/public/traces/{id}",
         count: "0.6666666666666666",
+        lastSeen: "2026-06-24T12:34:56.789123Z",
       },
     ]);
   });
@@ -229,21 +272,25 @@ describe("v4TransitionRouter", () => {
       time: "2026-06-24T00:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[12]).toEqual({
       time: "2026-06-24T12:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[13]).toEqual({
       time: "2026-06-24T12:00:00Z",
       entrypoint: "publicapi: GET /api/public/traces/{id}",
       count: 0.6666666666666666,
+      lastSeen: "2026-06-24T12:34:56.789123Z",
     });
     expect(rows[24]).toEqual({
       time: "2026-06-24T23:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
 
     expect(mockedQueryClickhouse).toHaveBeenCalledTimes(1);
@@ -259,6 +306,9 @@ describe("v4TransitionRouter", () => {
     );
     expect(clickhouseQuery?.query).toContain(
       "sum(1.0 / clickhouse_queries_per_api_call) AS count",
+    );
+    expect(clickhouseQuery?.query).toContain(
+      "formatDateTime(max(event_time_microseconds), '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS lastSeen",
     );
     expect(clickhouseQuery?.query).toContain(
       "SETTINGS skip_unavailable_shards = 1",
@@ -287,6 +337,7 @@ describe("v4TransitionRouter", () => {
       "GET /api/public/v2/scores",
       "GET /api/public/metrics",
       "GET /api/public/metrics/daily",
+      "GET /api/public/dataset-run-items",
     ].forEach((route) => expect(clickhouseQuery?.query).toContain(route));
 
     [
@@ -295,10 +346,14 @@ describe("v4TransitionRouter", () => {
       "GET /api/public/observations/{id}",
       "GET /api/public/scores/{id}",
       "GET /api/public/v2/scores/{id}",
+      "GET /api/public/datasets/{datasetName}/runs/{runName}",
     ].forEach((route) => expect(clickhouseQuery?.query).toContain(route));
+    expect(clickhouseQuery?.query).toContain(
+      "match(route_path, '^GET /api/public/datasets/[^/?#]+/runs/[^/?#]+$'), 1",
+    );
 
     expect(clickhouseQuery?.query).toContain(
-      "'GET /api/public/traces',\n        'GET /api/public/observations',\n        'GET /api/public/scores',\n        'GET /api/public/v2/scores',\n        'GET /api/public/metrics/daily'\n      ), 2",
+      "'GET /api/public/traces',\n        'GET /api/public/observations',\n        'GET /api/public/scores',\n        'GET /api/public/v2/scores',\n        'GET /api/public/metrics/daily',\n        'GET /api/public/dataset-run-items'\n      ), 2",
     );
     expect(clickhouseQuery?.query).toContain(
       "'GET /api/public/sessions',\n        'GET /api/public/metrics'\n      ), 1",
@@ -314,6 +369,7 @@ describe("v4TransitionRouter", () => {
         time: "2026-06-10T00:00:00Z",
         entrypoint: "publicapi: GET /api/public/traces",
         count: "42",
+        lastSeen: "2026-06-10T17:42:00Z",
       },
     ]);
 
@@ -334,21 +390,25 @@ describe("v4TransitionRouter", () => {
       time: "2026-05-26T00:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[15]).toEqual({
       time: "2026-06-10T00:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[16]).toEqual({
       time: "2026-06-10T00:00:00Z",
       entrypoint: "publicapi: GET /api/public/traces",
       count: 42,
+      lastSeen: "2026-06-10T17:42:00Z",
     });
     expect(rows[30]).toEqual({
       time: "2026-06-24T00:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
 
     const clickhouseQuery = mockedQueryClickhouse.mock.calls[0]?.[0];
@@ -363,6 +423,7 @@ describe("v4TransitionRouter", () => {
         time: "2026-06-24T00:20:00Z",
         entrypoint: "publicapi: GET /api/public/traces",
         count: "8",
+        lastSeen: "2026-06-24T00:21:30Z",
       },
     ]);
 
@@ -381,21 +442,25 @@ describe("v4TransitionRouter", () => {
       time: "2026-06-24T00:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[10]).toEqual({
       time: "2026-06-24T00:20:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[11]).toEqual({
       time: "2026-06-24T00:20:00Z",
       entrypoint: "publicapi: GET /api/public/traces",
       count: 8,
+      lastSeen: "2026-06-24T00:21:30Z",
     });
     expect(rows[30]).toEqual({
       time: "2026-06-24T00:58:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
 
     const clickhouseQuery = mockedQueryClickhouse.mock.calls[0]?.[0];
@@ -410,6 +475,7 @@ describe("v4TransitionRouter", () => {
         time: "2026-06-24T00:16:00Z",
         entrypoint: "publicapi: GET /api/public/traces",
         count: "8",
+        lastSeen: "2026-06-24T00:17:45Z",
       },
     ]);
 
@@ -428,21 +494,25 @@ describe("v4TransitionRouter", () => {
       time: "2026-06-24T00:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[8]).toEqual({
       time: "2026-06-24T00:16:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[9]).toEqual({
       time: "2026-06-24T00:16:00Z",
       entrypoint: "publicapi: GET /api/public/traces",
       count: 8,
+      lastSeen: "2026-06-24T00:17:45Z",
     });
     expect(rows[23]).toEqual({
       time: "2026-06-24T00:44:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
 
     const clickhouseQuery = mockedQueryClickhouse.mock.calls[0]?.[0];
@@ -457,6 +527,7 @@ describe("v4TransitionRouter", () => {
         time: "2026-06-24T01:00:00Z",
         entrypoint: "publicapi: GET /api/public/traces",
         count: "12",
+        lastSeen: "2026-06-24T01:04:59Z",
       },
     ]);
 
@@ -475,21 +546,25 @@ describe("v4TransitionRouter", () => {
       time: "2026-06-24T00:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[12]).toEqual({
       time: "2026-06-24T01:00:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
     expect(rows[13]).toEqual({
       time: "2026-06-24T01:00:00Z",
       entrypoint: "publicapi: GET /api/public/traces",
       count: 12,
+      lastSeen: "2026-06-24T01:04:59Z",
     });
     expect(rows[36]).toEqual({
       time: "2026-06-24T02:55:00Z",
       entrypoint: "",
       count: 0,
+      lastSeen: null,
     });
 
     const clickhouseQuery = mockedQueryClickhouse.mock.calls[0]?.[0];
@@ -519,10 +594,7 @@ describe("v4TransitionRouter", () => {
   });
 
   it("rejects ranges over 30 days", async () => {
-    const mockPrisma = {
-      $queryRaw: vi.fn(),
-    };
-    const caller = createCaller(mockPrisma);
+    const caller = createCaller();
 
     await expect(
       caller.timeSeriesByEntrypoint({
@@ -533,26 +605,7 @@ describe("v4TransitionRouter", () => {
       }),
     ).rejects.toThrow("30 days");
 
-    await expect(
-      caller.traceLevelEvalExecutionsTimeSeries({
-        projectId,
-        fromTimestamp: new Date("2026-05-25T00:00:00Z"),
-        toTimestamp: new Date("2026-06-25T00:00:00Z"),
-        granularity: "auto",
-      }),
-    ).rejects.toThrow("30 days");
-
-    await expect(
-      caller.sdkUsageTimeSeries({
-        projectId,
-        fromTimestamp: new Date("2026-05-25T00:00:00Z"),
-        toTimestamp: new Date("2026-06-25T00:00:00Z"),
-        granularity: "auto",
-      }),
-    ).rejects.toThrow("30 days");
-
     expect(mockedQueryClickhouse).not.toHaveBeenCalled();
-    expect(mockPrisma.$queryRaw).not.toHaveBeenCalled();
   });
 
   it("summarizes legacy integrations", async () => {
@@ -604,21 +657,83 @@ describe("v4TransitionRouter", () => {
   it("summarizes trace-level evals", async () => {
     const mockPrisma = {
       jobConfiguration: {
-        count: vi.fn().mockResolvedValue(3),
+        findMany: vi.fn().mockResolvedValue([
+          { targetObject: "dataset", variableMapping: [] },
+          {
+            targetObject: "trace",
+            variableMapping: [
+              {
+                templateVariable: "input",
+                langfuseObject: "generation",
+                objectName: "my-generation",
+                selectedColumnId: "input",
+              },
+            ],
+          },
+          {
+            targetObject: "trace",
+            variableMapping: [
+              {
+                templateVariable: "input",
+                langfuseObject: "trace",
+                selectedColumnId: "input",
+              },
+            ],
+          },
+        ]),
+      },
+    };
+    const caller = createCaller(mockPrisma);
+
+    // The third config maps from the trace itself, so the set is not fully
+    // assistant-migratable.
+    await expect(caller.traceLevelEvalSummary({ projectId })).resolves.toEqual({
+      traceLevelEvalCount: 3,
+      allAssistantMigratable: false,
+    });
+
+    expect(mockPrisma.jobConfiguration.findMany).toHaveBeenCalledWith({
+      where: {
+        projectId,
+        jobType: "EVAL",
+        targetObject: { in: ["trace", "dataset"] },
+        status: "ACTIVE",
+        timeScope: { has: "NEW" },
+      },
+      select: { targetObject: true, variableMapping: true },
+    });
+  });
+
+  it("marks evals as assistant-migratable when all are dataset targets or single-observation mappings", async () => {
+    const mockPrisma = {
+      jobConfiguration: {
+        findMany: vi.fn().mockResolvedValue([
+          { targetObject: "dataset", variableMapping: [] },
+          {
+            targetObject: "trace",
+            variableMapping: [
+              {
+                templateVariable: "input",
+                langfuseObject: "generation",
+                objectName: "my-generation",
+                selectedColumnId: "input",
+              },
+              {
+                templateVariable: "output",
+                langfuseObject: "generation",
+                objectName: "my-generation",
+                selectedColumnId: "output",
+              },
+            ],
+          },
+        ]),
       },
     };
     const caller = createCaller(mockPrisma);
 
     await expect(caller.traceLevelEvalSummary({ projectId })).resolves.toEqual({
-      traceLevelEvalCount: 3,
-    });
-
-    expect(mockPrisma.jobConfiguration.count).toHaveBeenCalledWith({
-      where: {
-        projectId,
-        jobType: "EVAL",
-        targetObject: "trace",
-      },
+      traceLevelEvalCount: 2,
+      allAssistantMigratable: true,
     });
   });
 
@@ -709,6 +824,7 @@ describe("v4TransitionRouter", () => {
             mixpanel: false,
             blobStorage: false,
           },
+          forceV3Experience: false,
         },
         {
           projectId: secondProjectId,
@@ -719,6 +835,7 @@ describe("v4TransitionRouter", () => {
             mixpanel: true,
             blobStorage: false,
           },
+          forceV3Experience: false,
         },
       ],
     });
@@ -727,6 +844,7 @@ describe("v4TransitionRouter", () => {
       where: {
         orgId,
         deletedAt: null,
+        id: { in: [projectId, secondProjectId] },
       },
       select: {
         id: true,
@@ -773,6 +891,7 @@ describe("v4TransitionRouter", () => {
       where: {
         orgId,
         deletedAt: null,
+        id: { in: [projectId, secondProjectId] },
       },
       select: {
         id: true,
@@ -783,7 +902,9 @@ describe("v4TransitionRouter", () => {
       where: {
         projectId: { in: [projectId, secondProjectId] },
         jobType: "EVAL",
-        targetObject: "trace",
+        targetObject: { in: ["trace", "dataset"] },
+        status: "ACTIVE",
+        timeScope: { has: "NEW" },
       },
       _count: { _all: true },
     });
@@ -851,427 +972,170 @@ describe("v4TransitionRouter", () => {
     ).resolves.toEqual([]);
   });
 
-  it("forbids organization members from accessing org-level v4 data", async () => {
+  it("allows project-only members to access org-level v4 data for their readable projects", async () => {
+    const findManyProjects = vi.fn().mockResolvedValue([
+      {
+        id: projectId,
+        name: "V4 Transition Project",
+      },
+    ]);
     const caller = createCaller(
       {
         project: {
-          findMany: vi.fn(),
+          findMany: findManyProjects,
+        },
+        posthogIntegration: {
+          findMany: vi.fn().mockResolvedValue([]),
+        },
+        mixpanelIntegration: {
+          findMany: vi.fn().mockResolvedValue([]),
+        },
+        blobStorageIntegration: {
+          findMany: vi.fn().mockResolvedValue([]),
         },
       },
-      createSessionWithOrgRole("MEMBER"),
+      createSessionWithOrgRole("NONE"),
     );
 
-    await expect(caller.summaryByProject({ orgId })).rejects.toMatchObject({
-      code: "FORBIDDEN",
-    });
-    await expect(
-      caller.traceLevelEvalSummaryByProject({
-        orgId,
-      }),
-    ).rejects.toMatchObject({
-      code: "FORBIDDEN",
-    });
-    await expect(
-      caller.legacyApiUsageSummaryByProject({
-        orgId,
-        fromTimestamp: new Date("2026-06-24T00:00:00Z"),
-        toTimestamp: new Date("2026-06-25T00:00:00Z"),
-      }),
-    ).rejects.toMatchObject({
-      code: "FORBIDDEN",
-    });
-    await expect(
-      caller.sdkUsageSummaryByProject({
-        orgId,
-        fromTimestamp: new Date("2026-06-24T00:00:00Z"),
-        toTimestamp: new Date("2026-06-25T00:00:00Z"),
-      }),
-    ).rejects.toMatchObject({
-      code: "FORBIDDEN",
-    });
-  });
-
-  it("queries trace-level eval execution counts with the same 2 minute buckets as the legacy API timeline", async () => {
-    const mockPrisma = {
-      $queryRaw: vi.fn().mockResolvedValue([
+    await expect(caller.summaryByProject({ orgId })).resolves.toEqual({
+      projects: [
         {
-          time: "2026-06-25T12:00:00Z",
-          scoreName: "toxicity",
-          count: 4n,
+          projectId,
+          projectName: "V4 Transition Project",
+          legacyIntegrationCount: 0,
+          legacyIntegrations: {
+            posthog: false,
+            mixpanel: false,
+            blobStorage: false,
+          },
+          forceV3Experience: false,
         },
-        {
-          time: "2026-06-25T12:04:00Z",
-          scoreName: "helpfulness",
-          count: 2,
+      ],
+    });
+    expect(findManyProjects).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          orgId,
+          deletedAt: null,
+          id: { in: [projectId] },
         },
-      ]),
-    };
-    const caller = createCaller(mockPrisma);
-
-    const rows = await caller.traceLevelEvalExecutionsTimeSeries({
-      projectId,
-      fromTimestamp: new Date("2026-06-25T12:00:00Z"),
-      toTimestamp: new Date("2026-06-25T13:00:00Z"),
-      granularity: "auto",
-    });
-
-    expect(rows).toHaveLength(60);
-    expect(rows.slice(0, 4)).toEqual([
-      {
-        time: "2026-06-25T12:00:00Z",
-        scoreName: "helpfulness",
-        count: 0,
-      },
-      {
-        time: "2026-06-25T12:00:00Z",
-        scoreName: "toxicity",
-        count: 4,
-      },
-      {
-        time: "2026-06-25T12:02:00Z",
-        scoreName: "helpfulness",
-        count: 0,
-      },
-      {
-        time: "2026-06-25T12:02:00Z",
-        scoreName: "toxicity",
-        count: 0,
-      },
-    ]);
-    expect(
-      rows.find(
-        (row) =>
-          row.time === "2026-06-25T12:04:00Z" &&
-          row.scoreName === "helpfulness",
-      ),
-    ).toEqual({
-      time: "2026-06-25T12:04:00Z",
-      scoreName: "helpfulness",
-      count: 2,
-    });
-    expect(rows.at(-1)).toEqual({
-      time: "2026-06-25T12:58:00Z",
-      scoreName: "toxicity",
-      count: 0,
-    });
-
-    expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
-    const query = mockPrisma.$queryRaw.mock.calls[0]?.[0] as
-      | { sql?: string; text?: string; values?: unknown[] }
-      | undefined;
-    const queryText = query?.sql ?? query?.text ?? "";
-
-    expect(queryText).toContain("date_bin(?::interval, je.created_at");
-    expect(queryText).toContain(
-      "INNER JOIN job_configurations jc ON jc.id = je.job_configuration_id",
+      }),
     );
-    expect(queryText).toContain("jc.score_name AS score_name");
-    expect(queryText).toContain('score_name AS "scoreName"');
-    expect(queryText).toContain("je.project_id = ?");
-    expect(queryText).toContain("jc.project_id = ?");
-    expect(queryText).toContain("jc.job_type = 'EVAL'");
-    expect(queryText).toContain("jc.target_object = ?");
-    expect(queryText).toContain("je.status != 'CANCELLED'");
-    expect(queryText).toContain("je.created_at >= ?");
-    expect(queryText).toContain("je.created_at <= ?");
-    expect(queryText).toContain("bucket_time AT TIME ZONE 'UTC'");
-    expect(queryText).toContain("GROUP BY bucket_time, score_name");
-    expect(query?.values).toEqual([
-      "2 minutes",
-      projectId,
-      projectId,
-      "trace",
-      new Date("2026-06-25T12:00:00Z"),
-      new Date("2026-06-25T13:00:00Z"),
-    ]);
   });
 
-  it("uses hour buckets for 7 day trace-level eval execution timelines", async () => {
-    const mockPrisma = {
-      $queryRaw: vi.fn().mockResolvedValue([]),
-    };
-    const caller = createCaller(mockPrisma);
+  it.each(["MEMBER", "VIEWER"] as const)(
+    "allows project %s roles to access project-level v4 data",
+    async (role) => {
+      const mockPrisma = {
+        posthogIntegration: {
+          findUnique: vi.fn().mockResolvedValue(null),
+        },
+        mixpanelIntegration: {
+          findUnique: vi.fn().mockResolvedValue(null),
+        },
+        blobStorageIntegration: {
+          findUnique: vi.fn().mockResolvedValue(null),
+        },
+      };
 
-    const rows = await caller.traceLevelEvalExecutionsTimeSeries({
-      projectId,
-      fromTimestamp: new Date("2026-06-18T00:00:00Z"),
-      toTimestamp: new Date("2026-06-25T00:00:00Z"),
-      granularity: "auto",
-    });
-
-    expect(rows).toEqual([]);
-
-    const query = mockPrisma.$queryRaw.mock.calls[0]?.[0] as
-      | { sql?: string; text?: string; values?: unknown[] }
-      | undefined;
-    expect(query?.values?.[0]).toBe("1 hour");
-  });
-
-  it("queries SDK usage by exact SDK, version, and API key across event and score ingestion", async () => {
-    mockedQueryClickhouse.mockResolvedValueOnce([
-      {
-        time: "2026-06-25T12:00:00Z",
-        sdkName: "python",
-        sdkVersion: "3.9.0",
-        publicKey: "pk-lf-old-python",
-        count: "3",
-        firstSeen: "2026-06-25T12:01:00Z",
-        lastSeen: "2026-06-25T12:03:00Z",
-      },
-      {
-        time: "2026-06-25T12:04:00Z",
-        sdkName: "@langfuse/tracing",
-        sdkVersion: "5.1.0",
-        publicKey: "pk-lf-js-current",
-        count: 7,
-        firstSeen: "2026-06-25T12:04:00Z",
-        lastSeen: "2026-06-25T12:05:00Z",
-      },
-    ]);
-    const caller = createCaller();
-
-    const result = await caller.sdkUsageTimeSeries({
-      projectId,
-      fromTimestamp: new Date("2026-06-25T12:00:00Z"),
-      toTimestamp: new Date("2026-06-25T13:00:00Z"),
-      granularity: "auto",
-    });
-    const rows = result.rows;
-
-    expect(result.bucketTimes).toHaveLength(30);
-    expect(result.bucketTimes[0]).toBe("2026-06-25T12:00:00Z");
-    expect(result.bucketTimes.at(-1)).toBe("2026-06-25T12:58:00Z");
-    expect(rows).toHaveLength(2);
-    expect(
-      rows.find(
-        (row) =>
-          row.time === "2026-06-25T12:00:00Z" &&
-          row.sdkName === "python" &&
-          row.sdkVersion === "3.9.0" &&
-          row.publicKey === "pk-lf-old-python",
-      ),
-    ).toEqual({
-      time: "2026-06-25T12:00:00Z",
-      sdkName: "python",
-      sdkVersion: "3.9.0",
-      publicKey: "pk-lf-old-python",
-      count: 3,
-      firstSeen: "2026-06-25T12:01:00Z",
-      lastSeen: "2026-06-25T12:03:00Z",
-      canonicalSdkName: "python",
-      latestMajor: 4,
-      major: 3,
-      upgradeStatus: "outdated_major",
-    });
-    expect(
-      rows.find(
-        (row) =>
-          row.time === "2026-06-25T12:04:00Z" &&
-          row.sdkName === "@langfuse/tracing" &&
-          row.sdkVersion === "5.1.0" &&
-          row.publicKey === "pk-lf-js-current",
-      ),
-    ).toEqual({
-      time: "2026-06-25T12:04:00Z",
-      sdkName: "@langfuse/tracing",
-      sdkVersion: "5.1.0",
-      publicKey: "pk-lf-js-current",
-      count: 7,
-      firstSeen: "2026-06-25T12:04:00Z",
-      lastSeen: "2026-06-25T12:05:00Z",
-      canonicalSdkName: "javascript",
-      latestMajor: 5,
-      major: 5,
-      upgradeStatus: "current",
-    });
-    expect(
-      rows.find(
-        (row) =>
-          row.time === "2026-06-25T12:02:00Z" &&
-          row.sdkName === "python" &&
-          row.sdkVersion === "3.9.0" &&
-          row.publicKey === "pk-lf-old-python",
-      ),
-    ).toBeUndefined();
-
-    expect(mockedQueryClickhouse).toHaveBeenCalledTimes(1);
-    const clickhouseQuery = mockedQueryClickhouse.mock.calls[0]?.[0];
-    expect(clickhouseQuery?.query).toContain("FROM events_core");
-    expect(clickhouseQuery?.query).toContain("UNION ALL");
-    expect(clickhouseQuery?.query).toContain("FROM scores FINAL");
-    expect(
-      clickhouseQuery?.query.match(/project_id = \{projectId: String\}/g),
-    ).toHaveLength(2);
-    expect(clickhouseQuery?.query).not.toContain("system.columns");
-    expect(clickhouseQuery?.query).toContain(
-      "toStartOfInterval(event_time, INTERVAL 2 MINUTE, 'UTC')",
-    );
-    expect(clickhouseQuery?.query).toContain(
-      "if(ingestion_sdk_name = '', 'unknown', ingestion_sdk_name) AS sdk_name",
-    );
-    expect(clickhouseQuery?.query).toContain(
-      "if(ingestion_sdk_version = '', 'unknown', ingestion_sdk_version) AS sdk_version",
-    );
-    expect(clickhouseQuery?.query).toContain("ingestion_api_key AS public_key");
-    expect(clickhouseQuery?.query).toContain(
-      "GROUP BY toStartOfInterval(event_time, INTERVAL 2 MINUTE, 'UTC'), sdk_name, sdk_version, public_key",
-    );
-    expect(clickhouseQuery?.params).toMatchObject({
-      projectId,
-      fromTimestamp: "2026-06-25 12:00:00.000",
-      toTimestamp: "2026-06-25 13:00:00.000",
-    });
-    expect(clickhouseQuery?.tags).toEqual({
-      projectId,
-      route: "v4-sdk-usage-timeseries",
-    });
-    expect(clickhouseQuery?.preferredClickhouseService).toBe("EventsReadOnly");
-  });
-
-  it("forbids project members and viewers from accessing project-level v4 data", async () => {
-    const mockPrisma = {
-      posthogIntegration: {
-        findUnique: vi.fn(),
-      },
-      mixpanelIntegration: {
-        findUnique: vi.fn(),
-      },
-      blobStorageIntegration: {
-        findUnique: vi.fn(),
-      },
-      jobConfiguration: {
-        count: vi.fn(),
-      },
-      $queryRaw: vi.fn(),
-    };
-
-    for (const role of ["MEMBER", "VIEWER"] as const) {
       const caller = createCaller(
         mockPrisma,
         createSessionWithProjectRole(role),
       );
 
-      await expect(caller.summary({ projectId })).rejects.toMatchObject({
-        code: "FORBIDDEN",
+      await expect(caller.summary({ projectId })).resolves.toEqual({
+        legacyIntegrationCount: 0,
+        legacyIntegrations: {
+          posthog: false,
+          mixpanel: false,
+          blobStorage: false,
+        },
       });
-      await expect(
-        caller.traceLevelEvalSummary({ projectId }),
-      ).rejects.toMatchObject({
-        code: "FORBIDDEN",
-      });
-      await expect(
-        caller.timeSeriesByEntrypoint({
-          projectId,
-          fromTimestamp: new Date("2026-06-25T12:00:00Z"),
-          toTimestamp: new Date("2026-06-25T13:00:00Z"),
-          granularity: "auto",
-        }),
-      ).rejects.toMatchObject({
-        code: "FORBIDDEN",
-      });
-      await expect(
-        caller.traceLevelEvalExecutionsTimeSeries({
-          projectId,
-          fromTimestamp: new Date("2026-06-25T12:00:00Z"),
-          toTimestamp: new Date("2026-06-25T13:00:00Z"),
-          granularity: "auto",
-        }),
-      ).rejects.toMatchObject({
-        code: "FORBIDDEN",
-      });
-      await expect(
-        caller.sdkUsageTimeSeries({
-          projectId,
-          fromTimestamp: new Date("2026-06-25T12:00:00Z"),
-          toTimestamp: new Date("2026-06-25T13:00:00Z"),
-          granularity: "auto",
-        }),
-      ).rejects.toMatchObject({
-        code: "FORBIDDEN",
-      });
-    }
-
-    expect(mockedQueryClickhouse).not.toHaveBeenCalled();
-    expect(mockPrisma.posthogIntegration.findUnique).not.toHaveBeenCalled();
-    expect(mockPrisma.mixpanelIntegration.findUnique).not.toHaveBeenCalled();
-    expect(mockPrisma.blobStorageIntegration.findUnique).not.toHaveBeenCalled();
-    expect(mockPrisma.jobConfiguration.count).not.toHaveBeenCalled();
-    expect(mockPrisma.$queryRaw).not.toHaveBeenCalled();
-  });
-
-  it("queries SDK usage without a ClickHouse metadata preflight", async () => {
-    mockedQueryClickhouse.mockResolvedValueOnce([
-      {
-        time: "2026-06-25T12:00:00Z",
-        sdkName: "python",
-        sdkVersion: "4.0.0",
-        publicKey: "pk-lf-python",
-        count: 2,
-        firstSeen: "2026-06-25T12:00:00Z",
-        lastSeen: "2026-06-25T12:01:00Z",
-      },
-    ]);
-    const caller = createCaller();
-
-    const result = await caller.sdkUsageTimeSeries({
-      projectId,
-      fromTimestamp: new Date("2026-06-25T12:00:00Z"),
-      toTimestamp: new Date("2026-06-25T12:10:00Z"),
-      granularity: "auto",
-    });
-
-    expect(result.bucketTimes).toHaveLength(10);
-    expect(result.rows).toHaveLength(1);
-    expect(mockedQueryClickhouse).toHaveBeenCalledTimes(1);
-    const usageQuery = mockedQueryClickhouse.mock.calls[0]?.[0];
-    expect(usageQuery?.query).toContain("FROM events_core");
-    expect(usageQuery?.query).toContain("FROM scores FINAL");
-    expect(usageQuery?.query).toContain("UNION ALL");
-    expect(
-      usageQuery?.query.match(/project_id = \{projectId: String\}/g),
-    ).toHaveLength(2);
-    expect(usageQuery?.query).not.toContain("system.columns");
-  });
-
-  it("rejects SDK usage requests for projects outside the caller session", async () => {
-    const caller = createCaller();
-
-    await expect(
-      caller.sdkUsageTimeSeries({
-        projectId: secondProjectId,
-        fromTimestamp: new Date("2026-06-25T12:00:00Z"),
-        toTimestamp: new Date("2026-06-25T13:00:00Z"),
-        granularity: "auto",
-      }),
-    ).rejects.toThrow("User is not a member of this project");
-
-    expect(mockedQueryClickhouse).not.toHaveBeenCalled();
-  });
+    },
+  );
 
   it("summarizes outdated SDK usage series by organization project", async () => {
-    mockedQueryClickhouse.mockResolvedValueOnce([
-      {
-        projectId,
-        sdkName: "python",
-        sdkVersion: "3.9.0",
-        publicKey: "pk-lf-old-python",
-        count: "8",
-      },
-      {
-        projectId,
-        sdkName: "python",
-        sdkVersion: "4.0.0",
-        publicKey: "pk-lf-current-python",
-        count: "13",
-      },
-      {
-        projectId: secondProjectId,
-        sdkName: "@langfuse/tracing",
-        sdkVersion: "4.2.0",
-        publicKey: "pk-lf-old-js",
-        count: "5",
-      },
-    ]);
+    mockedQueryClickhouse
+      .mockResolvedValueOnce([
+        {
+          projectId,
+          sdkName: "python",
+          sdkVersion: "3.9.0",
+          publicKey: "pk-lf-python",
+          count: "8",
+          eventsCount: "8",
+          firstSeen: "2026-06-24T01:00:00Z",
+          lastSeen: "2026-06-24T02:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+        {
+          projectId,
+          sdkName: "python",
+          sdkVersion: "4.14.1",
+          publicKey: "pk-lf-python",
+          count: "13",
+          eventsCount: "13",
+          firstSeen: "2026-06-24T03:00:00Z",
+          lastSeen: "2026-06-24T04:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+        {
+          projectId,
+          sdkName: "python",
+          sdkVersion: "4.6.9",
+          publicKey: "pk-lf-pre-v4-python",
+          count: "5",
+          eventsCount: "0",
+          firstSeen: "2026-06-24T12:00:00Z",
+          lastSeen: "2026-06-24T13:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+        {
+          projectId,
+          sdkName: "python",
+          sdkVersion: "4.7.0",
+          publicKey: "pk-lf-current-python",
+          count: "6",
+          eventsCount: "6",
+          firstSeen: "2026-06-24T13:30:00Z",
+          lastSeen: "2026-06-24T14:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+        {
+          projectId: secondProjectId,
+          sdkName: "@langfuse/tracing",
+          sdkVersion: "5.3.9",
+          publicKey: "pk-lf-old-js",
+          count: "5",
+          eventsCount: "5",
+          firstSeen: "2026-06-24T01:00:00Z",
+          lastSeen: "2026-06-24T04:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+        {
+          projectId: secondProjectId,
+          sdkName: "unknown",
+          sdkVersion: "unknown",
+          publicKey: "pk-lf-otel",
+          count: "3",
+          eventsCount: "3",
+          firstSeen: "2026-06-24T01:00:00Z",
+          lastSeen: "2026-06-24T04:00:00Z",
+          hasDelayedOtelEvents: "0",
+        },
+        {
+          projectId: secondProjectId,
+          sdkName: "custom-otel-writer",
+          sdkVersion: "1.2.3",
+          publicKey: "pk-lf-custom-otel",
+          count: "2",
+          eventsCount: "2",
+          firstSeen: "2026-06-24T02:00:00Z",
+          lastSeen: "2026-06-24T03:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+      ])
+      .mockResolvedValueOnce([{ projectId, count: "1" }]);
     const mockPrisma = {
       project: {
         findMany: vi
@@ -1290,11 +1154,112 @@ describe("v4TransitionRouter", () => {
     expect(rows).toEqual([
       {
         projectId,
-        outdatedSdkUsageSeriesCount: 1,
+        experimentInstrumentationMigration: {
+          status: "sdk_usage_inconclusive",
+          upgradePath: "sdk",
+        },
+        sdkUsageSeries: [
+          {
+            sdkName: "python",
+            sdkVersion: "3.9.0",
+            canonicalSdkName: "python",
+            publicKey: "pk-lf-python",
+            count: 8,
+            eventsCount: 8,
+            firstSeen: "2026-06-24T01:00:00Z",
+            lastSeen: "2026-06-24T02:00:00Z",
+            hasDelayedOtelEvents: true,
+            attributionStatus: "attributed",
+            v4MigrationStatus: "upgrade_required",
+          },
+          {
+            sdkName: "python",
+            sdkVersion: "4.14.1",
+            canonicalSdkName: "python",
+            publicKey: "pk-lf-python",
+            count: 13,
+            eventsCount: 13,
+            firstSeen: "2026-06-24T03:00:00Z",
+            lastSeen: "2026-06-24T04:00:00Z",
+            hasDelayedOtelEvents: true,
+            attributionStatus: "attributed",
+            v4MigrationStatus: "compatible",
+          },
+          {
+            sdkName: "python",
+            sdkVersion: "4.6.9",
+            canonicalSdkName: "python",
+            publicKey: "pk-lf-pre-v4-python",
+            count: 5,
+            eventsCount: 0,
+            firstSeen: "2026-06-24T12:00:00Z",
+            lastSeen: "2026-06-24T13:00:00Z",
+            hasDelayedOtelEvents: true,
+            attributionStatus: "attributed",
+            v4MigrationStatus: "upgrade_recommended",
+          },
+          {
+            sdkName: "python",
+            sdkVersion: "4.7.0",
+            canonicalSdkName: "python",
+            publicKey: "pk-lf-current-python",
+            count: 6,
+            eventsCount: 6,
+            firstSeen: "2026-06-24T13:30:00Z",
+            lastSeen: "2026-06-24T14:00:00Z",
+            hasDelayedOtelEvents: true,
+            attributionStatus: "attributed",
+            v4MigrationStatus: "compatible",
+          },
+        ],
       },
       {
         projectId: secondProjectId,
-        outdatedSdkUsageSeriesCount: 1,
+        experimentInstrumentationMigration: {
+          status: "not_required",
+          upgradePath: null,
+        },
+        sdkUsageSeries: [
+          {
+            sdkName: "@langfuse/tracing",
+            sdkVersion: "5.3.9",
+            canonicalSdkName: "javascript",
+            publicKey: "pk-lf-old-js",
+            count: 5,
+            eventsCount: 5,
+            firstSeen: "2026-06-24T01:00:00Z",
+            lastSeen: "2026-06-24T04:00:00Z",
+            hasDelayedOtelEvents: true,
+            attributionStatus: "attributed",
+            v4MigrationStatus: "upgrade_recommended",
+          },
+          {
+            sdkName: "unknown",
+            sdkVersion: "unknown",
+            canonicalSdkName: null,
+            publicKey: "pk-lf-otel",
+            count: 3,
+            eventsCount: 3,
+            firstSeen: "2026-06-24T01:00:00Z",
+            lastSeen: "2026-06-24T04:00:00Z",
+            hasDelayedOtelEvents: false,
+            attributionStatus: "missing_name_and_version",
+            v4MigrationStatus: "unknown",
+          },
+          {
+            sdkName: "custom-otel-writer",
+            sdkVersion: "1.2.3",
+            canonicalSdkName: null,
+            publicKey: "pk-lf-custom-otel",
+            count: 2,
+            eventsCount: 2,
+            firstSeen: "2026-06-24T02:00:00Z",
+            lastSeen: "2026-06-24T03:00:00Z",
+            hasDelayedOtelEvents: true,
+            attributionStatus: "attributed",
+            v4MigrationStatus: "unknown",
+          },
+        ],
       },
     ]);
 
@@ -1302,16 +1267,23 @@ describe("v4TransitionRouter", () => {
       where: {
         orgId,
         deletedAt: null,
+        id: { in: [projectId, secondProjectId] },
       },
       select: {
         id: true,
       },
     });
-    expect(mockedQueryClickhouse).toHaveBeenCalledTimes(1);
+    expect(mockedQueryClickhouse).toHaveBeenCalledTimes(2);
     const usageQuery = mockedQueryClickhouse.mock.calls[0]?.[0];
     expect(usageQuery?.query).toContain("FROM events_core");
     expect(usageQuery?.query).toContain("UNION ALL");
     expect(usageQuery?.query).toContain("FROM scores FINAL");
+    const [eventsQuery, scoresQuery] = usageQuery?.query.split("UNION ALL") ?? [
+      "",
+      "",
+    ];
+    expect(eventsQuery).not.toContain("execution_trace_id IS NULL");
+    expect(scoresQuery).toContain("execution_trace_id IS NULL");
     expect(usageQuery?.query).not.toContain("system.columns");
     expect(
       usageQuery?.query.match(/project_id IN \{projectIds: Array\(String\)\}/g),
@@ -1319,6 +1291,29 @@ describe("v4TransitionRouter", () => {
     expect(usageQuery?.query).toContain(
       "GROUP BY project_id, sdk_name, sdk_version, public_key",
     );
+    expect(usageQuery?.query).toContain(
+      "if(countIf(is_otel_ingestion) > 0, argMaxIf(is_delayed_otel, event_time, is_otel_ingestion), NULL) AS hasDelayedOtelEvents",
+    );
+    expect(usageQuery?.query.match(/AS event_time/g)).toHaveLength(2);
+    expect(usageQuery?.query).toContain(
+      "formatDateTime(min(event_time), '%Y-%m-%dT%H:%i:%SZ', 'UTC') AS firstSeen",
+    );
+    expect(usageQuery?.query).toContain(
+      "formatDateTime(max(event_time), '%Y-%m-%dT%H:%i:%SZ', 'UTC') AS lastSeen",
+    );
+    expect(usageQuery?.query).toContain(
+      "ingestion_sdk_name NOT IN {internalSdkNames: Array(String)}",
+    );
+    const [eventsUsageQuery, scoresUsageQuery] =
+      usageQuery?.query.split("UNION ALL") ?? [];
+    expect(eventsUsageQuery).toContain(
+      "AND NOT startsWith(environment, 'langfuse-')",
+    );
+    expect(scoresUsageQuery).toContain(
+      "AND NOT startsWith(environment, 'langfuse-')",
+    );
+    expect(usageQuery?.query).not.toContain("toDate(start_time)");
+    expect(usageQuery?.query).not.toContain("toDate(timestamp)");
     expect(usageQuery?.params).toMatchObject({
       projectIds: [projectId, secondProjectId],
       fromTimestamp: "2026-06-24 00:00:00.000",
@@ -1326,6 +1321,170 @@ describe("v4TransitionRouter", () => {
     });
     expect(usageQuery?.tags).toEqual({
       route: "v4-org-sdk-usage-summary",
+    });
+
+    const experimentUsageQuery = mockedQueryClickhouse.mock.calls[1]?.[0];
+    expect(experimentUsageQuery?.query).toContain(
+      "splitByChar('?', JSONExtractString(log_comment, 'route'))[1] = 'POST /api/public/dataset-run-items'",
+    );
+    expect(experimentUsageQuery?.query).toContain(
+      "JSONExtractString(log_comment, 'projectId') IN {projectIds: Array(String)}",
+    );
+    expect(experimentUsageQuery?.query).toContain(
+      "event_date >= toDate({fromTimestamp: DateTime64(3)})",
+    );
+    expect(experimentUsageQuery?.params).toMatchObject({
+      projectIds: [projectId, secondProjectId],
+      fromTimestamp: "2026-06-24 00:00:00.000",
+      toTimestamp: "2026-06-25 00:00:00.000",
+    });
+    expect(experimentUsageQuery?.tags).toEqual({
+      route: "v4-org-experiment-instrumentation-summary",
+    });
+  });
+
+  it("requires removing dataset-run-items POST usage for native OTel instrumentation", async () => {
+    mockedQueryClickhouse
+      .mockResolvedValueOnce([
+        {
+          projectId,
+          sdkName: "unknown",
+          sdkVersion: "unknown",
+          publicKey: "pk-lf-otel",
+          count: "3",
+          firstSeen: "2026-06-24T01:00:00Z",
+          lastSeen: "2026-06-24T04:00:00Z",
+          hasDelayedOtelEvents: "0",
+        },
+      ])
+      .mockResolvedValueOnce([{ projectId, count: "1" }]);
+    const caller = createCaller({
+      project: {
+        findMany: vi.fn().mockResolvedValue([{ id: projectId }]),
+      },
+    });
+
+    const [summary] = await caller.sdkUsageSummaryByProject({
+      orgId,
+      fromTimestamp: new Date("2026-06-24T00:00:00Z"),
+      toTimestamp: new Date("2026-06-25T00:00:00Z"),
+    });
+
+    expect(summary).toMatchObject({
+      projectId,
+      experimentInstrumentationMigration: {
+        status: "required",
+        upgradePath: "api",
+      },
+    });
+  });
+
+  it("preserves SDK usage when the experiment instrumentation check fails", async () => {
+    mockedQueryClickhouse
+      .mockResolvedValueOnce([
+        {
+          projectId,
+          sdkName: "python",
+          sdkVersion: "3.9.0",
+          publicKey: "pk-lf-python",
+          count: "3",
+          firstSeen: "2026-06-24T01:00:00Z",
+          lastSeen: "2026-06-24T04:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+      ])
+      .mockRejectedValueOnce(new Error("query_log unavailable"));
+    const caller = createCaller({
+      project: {
+        findMany: vi.fn().mockResolvedValue([{ id: projectId }]),
+      },
+    });
+
+    const [summary] = await caller.sdkUsageSummaryByProject({
+      orgId,
+      fromTimestamp: new Date("2026-06-24T00:00:00Z"),
+      toTimestamp: new Date("2026-06-25T00:00:00Z"),
+    });
+
+    expect(summary).toMatchObject({
+      projectId,
+      experimentInstrumentationMigration: {
+        status: "check_failed",
+        upgradePath: null,
+      },
+      sdkUsageSeries: [
+        {
+          sdkName: "python",
+          sdkVersion: "3.9.0",
+          v4MigrationStatus: "upgrade_required",
+        },
+      ],
+    });
+  });
+
+  it("requires an API upgrade when POST usage predates the experiment runner", async () => {
+    mockedQueryClickhouse
+      .mockResolvedValueOnce([
+        {
+          projectId,
+          sdkName: "python",
+          sdkVersion: "3.3.5",
+          publicKey: "pk-lf-python",
+          count: "3",
+          firstSeen: "2026-06-24T01:00:00Z",
+          lastSeen: "2026-06-24T04:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+      ])
+      .mockResolvedValueOnce([{ projectId, count: "1" }]);
+    const caller = createCaller({
+      project: {
+        findMany: vi.fn().mockResolvedValue([{ id: projectId }]),
+      },
+    });
+
+    const [summary] = await caller.sdkUsageSummaryByProject({
+      orgId,
+      fromTimestamp: new Date("2026-06-24T00:00:00Z"),
+      toTimestamp: new Date("2026-06-25T00:00:00Z"),
+    });
+
+    expect(summary?.experimentInstrumentationMigration).toEqual({
+      status: "required",
+      upgradePath: "api",
+    });
+  });
+
+  it("does not require an upgrade for current experiment instrumentation", async () => {
+    mockedQueryClickhouse
+      .mockResolvedValueOnce([
+        {
+          projectId,
+          sdkName: "python",
+          sdkVersion: "4.0.0",
+          publicKey: "pk-lf-python",
+          count: "3",
+          firstSeen: "2026-06-24T01:00:00Z",
+          lastSeen: "2026-06-24T04:00:00Z",
+          hasDelayedOtelEvents: "1",
+        },
+      ])
+      .mockResolvedValueOnce([{ projectId, count: "1" }]);
+    const caller = createCaller({
+      project: {
+        findMany: vi.fn().mockResolvedValue([{ id: projectId }]),
+      },
+    });
+
+    const [summary] = await caller.sdkUsageSummaryByProject({
+      orgId,
+      fromTimestamp: new Date("2026-06-24T00:00:00Z"),
+      toTimestamp: new Date("2026-06-25T00:00:00Z"),
+    });
+
+    expect(summary?.experimentInstrumentationMigration).toEqual({
+      status: "not_required",
+      upgradePath: null,
     });
   });
 

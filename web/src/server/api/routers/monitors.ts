@@ -3,7 +3,7 @@ import { z } from "zod";
 import {
   createTRPCRouter,
   protectedProjectProcedure,
-  requireLangfuseCloud,
+  requireV4Writes,
 } from "@/src/server/api/trpc";
 import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { throwIfExceedsLimit } from "@/src/features/entitlements/server/hasEntitlementLimit";
@@ -18,8 +18,8 @@ import {
   UpdateMonitorSchema,
 } from "@langfuse/shared/monitors/server";
 
-/** monitorsProcedure protects every monitors route behind a Langfuse Cloud check. */
-const monitorsProcedure = protectedProjectProcedure.use(requireLangfuseCloud);
+/** monitorsProcedure protects monitor routes behind a v4Writes check. */
+const monitorsProcedure = protectedProjectProcedure.use(requireV4Writes);
 
 /** sessionContextFromCtx adapts a tRPC session into a MonitorService SessionContext. */
 const sessionContextFromCtx = (ctx: {
@@ -33,7 +33,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:CUD",
+        scope: "alerts:CUD",
       });
 
       const currentCount = await ctx.prisma.monitor.count({
@@ -55,7 +55,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:CUD",
+        scope: "alerts:CUD",
       });
       return MonitorService.update(sessionContextFromCtx(ctx), input);
     }),
@@ -66,7 +66,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:CUD",
+        scope: "alerts:CUD",
       });
       await MonitorService.delete(sessionContextFromCtx(ctx), input);
       return { success: true as const };
@@ -78,7 +78,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:read",
+        scope: "alerts:read",
       });
       return MonitorService.getById(sessionContextFromCtx(ctx), input);
     }),
@@ -89,7 +89,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:read",
+        scope: "alerts:read",
       });
       return MonitorService.list(sessionContextFromCtx(ctx), input);
     }),
@@ -100,7 +100,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:read",
+        scope: "alerts:read",
       });
       const count = await ctx.prisma.monitor.count({
         where: { project: { orgId: ctx.session.orgId, deletedAt: null } },
@@ -115,7 +115,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:read",
+        scope: "alerts:read",
       });
       const monitor = await ctx.prisma.monitor.findFirst({
         where: { projectId: input.projectId },
@@ -130,7 +130,7 @@ export const monitorsRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: input.projectId,
-        scope: "monitors:read",
+        scope: "alerts:read",
       });
       return MonitorService.getFilterOptions(sessionContextFromCtx(ctx), input);
     }),

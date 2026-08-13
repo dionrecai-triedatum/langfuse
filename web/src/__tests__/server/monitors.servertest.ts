@@ -1,3 +1,11 @@
+import { vi } from "vitest";
+
+// requireV4Writes 404s the monitors routes under the default legacy write mode;
+// env is parsed at module load, so force a passing mode before any import.
+vi.hoisted(() => {
+  process.env.LANGFUSE_MIGRATION_V4_WRITE_MODE = "dual";
+});
+
 import { appRouter } from "@/src/server/api/root";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import { entitlementAccess } from "@/src/features/entitlements/constants/entitlements";
@@ -38,20 +46,24 @@ const buildSession = (params: {
         plan: "cloud:hobby",
         cloudConfig: undefined,
         metadata: {},
+        aiFeaturesEnabled: false,
+        aiTelemetryEnabled: true,
         projects: [
           {
             id: params.projectId,
             role: params.projectRole,
             retentionDays: 30,
             deletedAt: null,
+            hasTraces: false,
             name: params.projectName,
             metadata: {},
+            createdAt: new Date().toISOString(),
           },
         ],
       },
     ],
     featureFlags: {
-      inAppAgent: false,
+      searchBar: false,
       templateFlag: false,
       excludeClickhouseRead: false,
       v4BetaToggleVisible: false,
@@ -187,7 +199,7 @@ describe("monitors trpc", () => {
       ).rejects.toThrow(/access/i);
     });
 
-    it("allows monitors.create from MEMBER role (monitors:CUD)", async () => {
+    it("allows monitors.create from MEMBER role (alerts:CUD)", async () => {
       const { project, caller } = await prepare({ projectRole: "MEMBER" });
 
       const created = await caller.monitors.create(
@@ -427,9 +439,9 @@ describe("monitors trpc", () => {
   describe("entitlement limit", () => {
     const monitorLimit =
       entitlementAccess["cloud:hobby"].entitlementLimits["monitor-count"];
-    if (typeof monitorLimit !== "number") {
+    if (typeof monitorLimit !== "number" || monitorLimit < 2) {
       throw new Error(
-        "expected cloud:hobby monitor-count limit to be a number",
+        "expected cloud:hobby monitor-count limit to be a number >= 2; the org-scoping test needs two distinct creatable counts",
       );
     }
 
@@ -489,11 +501,15 @@ describe("monitors trpc", () => {
 
     it("monitors.count is scoped to the caller's org", async () => {
       // Two independent orgs prove the count is org-scoped, not global.
+      // Counts derive from the limit so both stay creatable, and differ so a
+      // globally-scoped count could not satisfy both assertions.
+      const countA = monitorLimit;
+      const countB = monitorLimit - 1;
       const orgA = await prepare();
       const orgB = await prepare();
 
-      await seedMonitors(orgA.caller, orgA.project.id, 3);
-      await seedMonitors(orgB.caller, orgB.project.id, 2);
+      await seedMonitors(orgA.caller, orgA.project.id, countA);
+      await seedMonitors(orgB.caller, orgB.project.id, countB);
 
       const resultA = await orgA.caller.monitors.count({
         projectId: orgA.project.id,
@@ -502,8 +518,8 @@ describe("monitors trpc", () => {
         projectId: orgB.project.id,
       });
 
-      expect(resultA.count).toBe(3);
-      expect(resultB.count).toBe(2);
+      expect(resultA.count).toBe(countA);
+      expect(resultB.count).toBe(countB);
     });
   });
 

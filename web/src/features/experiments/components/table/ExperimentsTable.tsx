@@ -1,3 +1,4 @@
+import { MAX_SELECTED_EXPERIMENTS } from "@/src/features/experiments/constants/comparison";
 import { DataTable } from "@/src/components/table/data-table";
 import { DataTableToolbar } from "@/src/components/table/data-table-toolbar";
 import {
@@ -27,6 +28,7 @@ import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
 import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
 import { useTableDateRange } from "@/src/hooks/useTableDateRange";
 import { toAbsoluteTimeRange } from "@/src/utils/date-range-utils";
+import { TableHeaderControls } from "@/src/components/table/table-header-controls";
 import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
 import { GitCompareArrows, LightbulbIcon } from "lucide-react";
 import { LocalIsoDate } from "@/src/components/LocalIsoDate";
@@ -167,8 +169,9 @@ function ExperimentsMultiSelectActionMenu({
 
   if (selectedExperimentIds.length === 0) return null;
 
-  // Build table actions - Compare is disabled (not hidden) when >5 rows selected
-  const tooManySelected = selectedExperimentIds.length > 5;
+  // Build table actions - Compare is disabled (not hidden) when >MAX_SELECTED_EXPERIMENTS rows selected
+  const tooManySelected =
+    selectedExperimentIds.length > MAX_SELECTED_EXPERIMENTS;
   const tableActions: TableAction[] = [
     {
       id: ActionId.ExperimentCompare,
@@ -179,7 +182,7 @@ function ExperimentsMultiSelectActionMenu({
       customDialog: true,
       disabled: tooManySelected,
       disabledReason: tooManySelected
-        ? "Select only up to 5 experiments to compare"
+        ? `Select only up to ${MAX_SELECTED_EXPERIMENTS} experiments to compare`
         : undefined,
       accessCheck: {
         scope: "project:read",
@@ -241,7 +244,7 @@ export default function ExperimentsTable({
   defaultFilter,
   fixedFilter = [],
   sessionFilterContextId,
-  hideTimeRangePicker = false,
+  showControlsInPageHeader = false,
 }: ExperimentsTableProps) {
   const router = useRouter();
   const filterConfig = useMemo(
@@ -273,7 +276,10 @@ export default function ExperimentsTable({
     order: "DESC",
   });
 
-  const { timeRange, setTimeRange } = useTableDateRange(projectId);
+  const { timeRange, setTimeRange } = useTableDateRange(projectId, {
+    defaultRelativeAggregation: "last30Days",
+    persistAsDefault: false,
+  });
 
   // Convert timeRange to absolute date range for compatibility
   const tableDateRange = useMemo(() => {
@@ -732,6 +738,12 @@ export default function ExperimentsTable({
     <>
       <DataTableControlsProvider>
         <div className="flex h-full w-full flex-col">
+          {showControlsInPageHeader && (
+            <TableHeaderControls
+              timeRange={timeRange}
+              setTimeRange={setTimeRange}
+            />
+          )}
           {/* Toolbar spanning full width */}
           <DataTableToolbar
             columns={columns}
@@ -749,8 +761,8 @@ export default function ExperimentsTable({
             orderByState={orderByState}
             rowHeight={rowHeight}
             setRowHeight={setRowHeight}
-            timeRange={hideTimeRangePicker ? undefined : timeRange}
-            setTimeRange={hideTimeRangePicker ? undefined : setTimeRange}
+            timeRange={showControlsInPageHeader ? undefined : timeRange}
+            setTimeRange={showControlsInPageHeader ? undefined : setTimeRange}
             actionButtons={[
               <ExperimentsMultiSelectActionMenu
                 key="experiments-multi-select-actions"
@@ -771,7 +783,7 @@ export default function ExperimentsTable({
               <AccordionItem value="charts" className="border-t">
                 <AccordionTrigger className="px-3 pt-2 pb-1 hover:no-underline">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">Charts</span>
+                    <span className="text-sm font-bold">Charts</span>
                   </div>
                 </AccordionTrigger>
                 <AccordionContent className="max-h-[40dvh] overflow-x-auto px-3 pt-1 pb-1">

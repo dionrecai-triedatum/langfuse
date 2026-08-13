@@ -16,6 +16,7 @@ import {
   type MonitorQueueEventInput,
   MonitorWebhookQueueEventSchema,
 } from "../features/monitors/scheduler/types";
+import { ProjectNotificationWebhookQueueEventSchema } from "./notifications/types";
 
 export type { MonitorQueueEvent, MonitorQueueEventInput };
 
@@ -67,11 +68,24 @@ export const OtelIngestionEvent = z.object({
   sdkName: z.string().optional(),
   sdkVersion: z.string().optional(),
   ingestionVersion: z.string().optional(),
+  // Langfuse-internal telemetry (e.g. LLM-as-a-judge / prompt-experiment
+  // executions published by the internal AI SDK LLM runtime). The
+  // consumer must parse these events with the INTERNAL ingestion schema:
+  // the public schema strips the reserved "langfuse-" environment prefix,
+  // which would expose internal traces as user environments and bypass the
+  // trace-upsert eval-loop guard. Optional for in-flight job compatibility.
+  isLangfuseInternal: z.boolean().optional(),
 });
 
 export const BatchExportJobSchema = z.object({
   projectId: z.string(),
   batchExportId: z.string(),
+});
+// Deliberately minimal: the run row (in_app_agent_runs.request) carries the
+// typed input; the queue is delivery-only and the claim CAS owns correctness.
+export const InAppAgentRunQueueEventSchema = z.object({
+  projectId: z.string(),
+  runId: z.string(),
 });
 export const CloudSpendAlertJobSchema = z.object({
   orgId: z.string(),
@@ -276,10 +290,11 @@ export const promptVersionWebhookEnvelopeSchema = z.object({
     .optional(),
 });
 
-/** WebhookOutboundEnvelopeSchema is the WebhookInput.payload contract: a discriminated union over `type`. The monitor-alert variant is the unified envelope (queue payload = HTTP outbound body); the prompt-version variant keeps its original dispatch-time wrap. */
+/** WebhookOutboundEnvelopeSchema is the WebhookInput.payload contract: a discriminated union over `type`. The monitor-alert and system variants are unified envelopes (queue payload = HTTP outbound body); the prompt-version variant keeps its original dispatch-time wrap. */
 export const WebhookOutboundEnvelopeSchema = z.discriminatedUnion("type", [
   promptVersionWebhookEnvelopeSchema,
   MonitorWebhookQueueEventSchema,
+  ProjectNotificationWebhookQueueEventSchema,
 ]);
 
 export const WebhookInputSchema = z.object({
@@ -313,6 +328,9 @@ export type CreateEvalQueueEventType = z.infer<
   typeof CreateEvalQueueEventSchema
 >;
 export type BatchExportJobType = z.infer<typeof BatchExportJobSchema>;
+export type InAppAgentRunQueueEventType = z.infer<
+  typeof InAppAgentRunQueueEventSchema
+>;
 export type CloudSpendAlertJobType = z.infer<typeof CloudSpendAlertJobSchema>;
 export type TraceQueueEventType = z.infer<typeof TraceQueueEventSchema>;
 export type TracesQueueEventType = z.infer<typeof TracesQueueEventSchema>;
@@ -396,6 +414,7 @@ export enum QueueName {
   EventPropagationQueue = "event-propagation-queue",
   NotificationQueue = "notification-queue",
   MonitorQueue = "monitor-queue",
+  InAppAgentRunQueue = "in-app-agent-run-queue",
 }
 
 export enum QueueJobs {
@@ -433,6 +452,7 @@ export enum QueueJobs {
   EventPropagationJob = "event-propagation-job",
   NotificationJob = "notification-job",
   MonitorJob = "monitor-job",
+  InAppAgentRunJob = "in-app-agent-run-job",
 }
 
 export type TQueueJobTypes = {
@@ -619,5 +639,11 @@ export type TQueueJobTypes = {
     id: string;
     payload: MonitorQueueEventInput;
     name: QueueJobs.MonitorJob;
+  };
+  [QueueName.InAppAgentRunQueue]: {
+    timestamp: Date;
+    id: string;
+    payload: InAppAgentRunQueueEventType;
+    name: QueueJobs.InAppAgentRunJob;
   };
 };

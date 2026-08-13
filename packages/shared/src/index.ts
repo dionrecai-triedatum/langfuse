@@ -1,9 +1,11 @@
 export * from "./constants";
 export { decodeUnicodeEscapesOnly } from "./utils/unicode";
+export { stringify, stringifyForCsv } from "./utils/stringify";
 export * from "./interfaces/filters";
 export * from "./interfaces/orderBy";
 export * from "./interfaces/cloudConfigSchema";
 export * from "./interfaces/parseDbOrg";
+export * from "./interfaces/billingProvider";
 export * from "./interfaces/customLLMProviderConfigSchemas";
 export * from "./tableDefinitions";
 export * from "./types";
@@ -26,9 +28,11 @@ export * from "./domain/webhooks";
 export * from "./domain/dataset-run-items";
 export * from "./domain/dataset-items";
 export * from "./domain/score-configs";
+export * from "./domain/home-dashboard";
 
 // llm api
 export * from "./server/llm/types";
+export * from "./server/llm/promptToolConfig";
 
 // evals
 export * from "./features/evals/types";
@@ -43,6 +47,20 @@ export * from "./features/batchAction/types";
 export * from "./features/batchAction/addToDatasetTypes";
 export * from "./features/batchAction/applyFieldMapping";
 export { BatchTableNames } from "./interfaces/tableNames";
+
+// in-app agent
+export * from "./features/inAppAgent/types";
+
+// rbac
+export * from "./features/rbac/projectAccessRights";
+
+// filters
+export * from "./features/filters/internalEnvironments";
+export * from "./features/filters/filterQueryEncoding";
+export * from "./features/filters/sessionPositionInTrace";
+
+// date ranges
+export * from "./utils/dateRanges";
 
 // annotation
 export * from "./features/annotation/types";
@@ -90,6 +108,7 @@ export * from "./errors/index";
 
 export * from "./utils/environment";
 export * from "./interfaces/search";
+export { normalizeIngestionSdkName } from "./server/ingestion/ingestionAttribution";
 
 // domain
 export * from "./domain";

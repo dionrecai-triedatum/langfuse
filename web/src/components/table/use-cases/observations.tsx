@@ -17,6 +17,7 @@ import {
 import { TokenUsageBadge } from "@/src/components/token-usage-badge";
 import { useQueryFilterState } from "@/src/features/filters/hooks/useFilterState";
 import { usePaginationState } from "@/src/hooks/usePaginationState";
+import { useFacetOptionsWithObservedMetadata } from "@/src/hooks/useObservedMetadata";
 import {
   type UseSidebarFilterStateOptions,
   useSidebarFilterState,
@@ -26,17 +27,9 @@ import {
   OBSERVATION_COLUMN_TO_BACKEND_KEY,
   type ObservationsOmittableFilterColumn,
 } from "@/src/features/filters/config/observations-config";
-import { DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG } from "@/src/features/filters/constants/internal-environments";
-import { transformFiltersForBackend } from "@/src/features/filters/lib/filter-transform";
-import { formatIntervalSeconds } from "@/src/utils/dates";
-import useColumnVisibility from "@/src/features/column-visibility/hooks/useColumnVisibility";
+import { buildSidebarFilterSessionContextId } from "@/src/features/filters/lib/persistedSidebarFilterQuery";
 import {
-  TableBadgeLoadingCell,
-  TableIconBadgeLoadingCell,
-  TableTextLoadingCell,
-} from "@/src/components/table/loading-cells";
-import { type LangfuseColumnDef } from "@/src/components/table/types";
-import {
+  DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG,
   type ObservationLevelType,
   type FilterState,
   BatchExportTableName,
@@ -48,9 +41,20 @@ import {
   type TimeFilter,
   type OrderByState,
   type TracingSearchType,
+  type ScoreAggregate,
 } from "@langfuse/shared";
+import { transformFiltersForBackend } from "@/src/features/filters/lib/filter-transform";
+import { sortOptionValues } from "@/src/features/filters/lib/option-sort";
+import { formatIntervalSeconds } from "@/src/utils/dates";
+import useColumnVisibility from "@/src/features/column-visibility/hooks/useColumnVisibility";
+import {
+  TableBadgeLoadingCell,
+  TableIconBadgeLoadingCell,
+  TableTextLoadingCell,
+} from "@/src/components/table/loading-cells";
+import { type LangfuseColumnDef } from "@/src/components/table/types";
 import { cn } from "@/src/utils/tailwind";
-import { LevelColors } from "@/src/components/level-colors";
+import { getLevelColors } from "@/src/components/level-colors";
 import { numberFormatter, usdFormatter } from "@/src/utils/numbers";
 import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
 import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
@@ -61,14 +65,14 @@ import {
   toAbsoluteTimeRange,
   type TableDateRange,
 } from "@/src/utils/date-range-utils";
-import { type ScoreAggregate } from "@langfuse/shared";
+import { TableHeaderControls } from "@/src/components/table/table-header-controls";
 import TagList from "@/src/features/tag/components/TagList";
 import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
 import { BatchExportTableButton } from "@/src/components/BatchExportTableButton";
 import {
   BreakdownTooltip,
   calculateAggregatedUsage,
-} from "@/src/components/trace/components/_shared/BreakdownToolTip";
+} from "@/src/features/traces";
 import { InfoIcon } from "lucide-react";
 import { ProvidedModelNameCell } from "@/src/features/models/components/ProvidedModelNameCell";
 import { LocalIsoDate } from "@/src/components/LocalIsoDate";
@@ -96,9 +100,9 @@ import useSessionStorage from "@/src/components/useSessionStorage";
 import { buildTraceDetailPath } from "@/src/utils/navigation";
 import { getSafeRedirectPath } from "@/src/utils/redirect";
 import {
-  type RefreshInterval,
   REFRESH_INTERVALS,
-} from "@/src/components/table/data-table-refresh-button";
+  type RefreshInterval,
+} from "@/src/components/table/utils/refresh-intervals";
 import {
   ObservationsTableStoreProvider,
   useObservationsTableStore,
@@ -158,13 +162,16 @@ export type ObservationsTableProps = {
   omittedFilter?: ObservationsOmittableFilterColumn[];
   // External control props for embedded preview tables
   hideControls?: boolean;
-  /** Hide the toolbar time-range picker. Set by pages that render the picker
-   *  in the page header (TableTimeRangeHeaderPicker) — both read the same
-   *  shared per-project range, so embedded usages keep the toolbar picker. */
-  hideTimeRangePicker?: boolean;
   externalFilterState?: FilterState;
   externalDateRange?: TableDateRange;
   limitRows?: number;
+  /**
+   * When true, render the time-range picker and auto-refresh button in the
+   * page header (next to the title) via the header controls slot, instead of
+   * inside the table toolbar. Only used when the table is the primary content
+   * of a `Page`.
+   */
+  showControlsInPageHeader?: boolean;
 };
 
 export default function ObservationsTable({
@@ -174,10 +181,10 @@ export default function ObservationsTable({
   modelId,
   omittedFilter = [],
   hideControls = false,
-  hideTimeRangePicker = false,
   externalFilterState,
   externalDateRange,
   limitRows,
+  showControlsInPageHeader = false,
 }: ObservationsTableProps) {
   const peekContext = usePeekTableState();
 
@@ -413,6 +420,7 @@ export default function ObservationsTable({
       ) ?? undefined;
 
     const scoresNumeric = filterOptions.data?.scores_avg ?? undefined;
+    const scoresBoolean = filterOptions.data?.score_booleans ?? undefined;
 
     return {
       environment:
@@ -449,11 +457,13 @@ export default function ObservationsTable({
           value: pn.value,
           count: pn.count !== undefined ? Number(pn.count) : undefined,
         })) ?? undefined,
-      tags:
+      // tags read A→Z
+      tags: sortOptionValues(
         filterOptions.data?.tags?.map((t) => ({
           value: t.value,
           count: t.count !== undefined ? Number(t.count) : undefined,
-        })) ?? undefined,
+        })),
+      ),
       toolNames:
         filterOptions.data?.toolNames?.map((tn) => ({
           value: tn.value,
@@ -475,6 +485,7 @@ export default function ObservationsTable({
       totalCost: [],
       score_categories: scoreCategories,
       scores_avg: scoresNumeric,
+      score_booleans: scoresBoolean,
     };
   }, [environmentFilterOptions.data, filterOptions.data]);
 
@@ -505,13 +516,31 @@ export default function ObservationsTable({
     return {
       ...baseOptions,
       stateLocation: "urlAndSessionStorage",
-      sessionFilterContextId: projectId,
+      sessionFilterContextId: buildSidebarFilterSessionContextId(
+        projectId,
+        promptName ? "prompt" : modelId ? "model" : undefined,
+      ),
     };
-  }, [hideControls, isSidebarFilterLoading, peekContext, projectId]);
+  }, [
+    hideControls,
+    isSidebarFilterLoading,
+    peekContext,
+    projectId,
+    promptName,
+    modelId,
+  ]);
+
+  // Opt into the shared observed-metadata suggestions for the Metadata facet
+  // (LFE-11030). This table's rows fetch metadata per cell, so it reads the
+  // per-project map without contributing to it.
+  const facetOptions = useFacetOptionsWithObservedMetadata(
+    projectId,
+    newFilterOptions,
+  );
 
   const queryFilter = useSidebarFilterState(
     observationsFilterConfig,
-    newFilterOptions,
+    facetOptions,
     queryFilterOptions,
   );
 
@@ -531,8 +560,13 @@ export default function ObservationsTable({
     modelIdFilter,
   );
 
-  // Use external filter state if provided, otherwise use combined filter state
-  const filterState = externalFilterState || combinedFilterState;
+  // Use external filter state if provided, otherwise use combined filter
+  // state. Even with an external filter, still apply the date-range bound so
+  // callers that pass an externalDateRange (e.g. the eval preview's "last 24
+  // hours" window) have it honored for the row query, not just score columns.
+  const filterState = externalFilterState
+    ? externalFilterState.concat(dateRangeFilter)
+    : combinedFilterState;
 
   const backendFilterState = transformFiltersForBackend(
     filterState,
@@ -780,8 +814,8 @@ export default function ObservationsTable({
           <span
             className={cn(
               "rounded-sm p-0.5 text-xs",
-              LevelColors[value].bg,
-              LevelColors[value].text,
+              getLevelColors(value).bg,
+              getLevelColors(value).text,
             )}
           >
             {value}
@@ -1383,8 +1417,22 @@ export default function ObservationsTable({
     });
   }, [observationsTableStore, pageRowIds, totalCount]);
 
+  const refreshConfig = {
+    onRefresh: handleRefresh,
+    isRefreshing: generations.isFetching || totalCountQuery.isFetching,
+    interval: refreshInterval,
+    setInterval: setRefreshInterval,
+  };
+
   const content = (
     <>
+      {showControlsInPageHeader && !hideControls && (
+        <TableHeaderControls
+          timeRange={timeRange}
+          setTimeRange={setTimeRange}
+          refresh={refreshConfig}
+        />
+      )}
       <div className="flex h-full w-full flex-col">
         {/* Toolbar spanning full width */}
         {!hideControls && (
@@ -1417,15 +1465,9 @@ export default function ObservationsTable({
             orderByState={orderByState}
             rowHeight={rowHeight}
             setRowHeight={setRowHeight}
-            timeRange={hideTimeRangePicker ? undefined : timeRange}
-            setTimeRange={hideTimeRangePicker ? undefined : setTimeRange}
-            refreshConfig={{
-              onRefresh: handleRefresh,
-              isRefreshing:
-                generations.isFetching || totalCountQuery.isFetching,
-              interval: refreshInterval,
-              setInterval: setRefreshInterval,
-            }}
+            timeRange={showControlsInPageHeader ? undefined : timeRange}
+            setTimeRange={showControlsInPageHeader ? undefined : setTimeRange}
+            refreshConfig={showControlsInPageHeader ? undefined : refreshConfig}
             projectId={projectId}
             backendFilterState={backendFilterState}
             searchQuery={searchQuery}

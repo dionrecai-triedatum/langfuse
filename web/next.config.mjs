@@ -5,6 +5,7 @@
 await import("./src/env.mjs");
 import { withSentryConfig } from "@sentry/nextjs";
 import { env } from "./src/env.mjs";
+import { renamedRouteRedirects } from "./redirects.mjs";
 
 /**
  * CSP headers
@@ -62,6 +63,14 @@ const reportToHeader = {
 
 /** @type {import("next").NextConfig} */
 const nextConfig = {
+  // Emit and serve browser source maps in production. Langfuse is open source,
+  // so there is nothing to hide by shipping maps, and browser devtools then
+  // de-minify client stacks automatically. NOTE: this alone does NOT make Sentry
+  // legible — the Sentry SDK rewrites frames to the `app:///` scheme, which is
+  // not a fetchable URL, so Sentry cannot pull these public maps. Sentry
+  // symbolication is handled separately by uploading maps with debug IDs (see
+  // `sourcemaps` in withSentryConfig below).
+  productionBrowserSourceMaps: true,
   // Allow building to alternate directory for parallel build checks while dev server runs
   distDir: process.env.NEXT_DIST_DIR || ".next",
   typescript: {
@@ -82,6 +91,10 @@ const nextConfig = {
     "bullmq",
     "@opentelemetry/sdk-node",
     "@opentelemetry/instrumentation-winston",
+    // The local-only dangerous-docker sandbox provider depends on dockerode,
+    // which pulls ssh2 assets that Turbopack cannot place into ESM chunks.
+    // Keep it external to the server bundle and load it only at runtime.
+    "dockerode",
   ],
   poweredByHeader: false,
   basePath: env.NEXT_PUBLIC_BASE_PATH,
@@ -105,7 +118,8 @@ const nextConfig = {
     browserToTerminal: true,
   },
   experimental: {
-    turbopackFileSystemCacheForBuild: true,
+    // Use the Rust port instead of the Babel transform
+    // turbopackRustReactCompiler: true,
   },
 
   /**
@@ -119,6 +133,10 @@ const nextConfig = {
     defaultLocale: "en",
   },
   output: "standalone",
+
+  async redirects() {
+    return renamedRouteRedirects;
+  },
 
   async rewrites() {
     return [
@@ -268,30 +286,48 @@ const sentryConfig = withSentryConfig(nextConfig, {
   // Upload a larger set of source maps for prettier stack traces (increases build time)
   widenClientFileUpload: true,
 
-  // Automatically annotate React components to show their full name in breadcrumbs and session replay
-  reactComponentAnnotation: {
-    enabled: true,
-  },
-
   // Route browser requests to Sentry through a Next.js rewrite to circumvent ad-blockers.
   // This can increase your server load as well as your hosting bill.
   // Note: Check that the configured route will not match with your Next.js middleware, otherwise reporting of client-
   // side errors will fail.
   // tunnelRoute: "/api/monitoring-tunnel",
 
-  // Hides source maps from generated client bundles
+  // Upload source maps to Sentry with debug IDs so Sentry can symbolicate
+  // minified production stack traces. This restores upload that regressed in the
+  // Sentry v8->v10 upgrade (#8934): it mistranslated the old `hideSourceMaps:
+  // true` (upload, then hide from the public bundle) into `sourcemaps.disable`
+  // (do not upload at all) — the correct v10 equivalent was
+  // `deleteSourcemapsAfterUpload: true` — so Sentry stacks have been minified
+  // since. Upload worked across all regions/orgs/projects under v8 via the same
+  // per-region SENTRY_ORG/SENTRY_PROJECT/SENTRY_AUTH_TOKEN this reads. Debug IDs
+  // match a map to an event by an embedded id, independent of URLs and the
+  // `app:///` frame rewrite — which is why serving maps at a public
+  // sourceMappingURL (#15277) can't symbolicate Sentry. Upload runs only when
+  // SENTRY_AUTH_TOKEN is present (prod builds) and targets the per-region
+  // org/project/release baked into each region's build. We also keep serving the
+  // maps publicly (`productionBrowserSourceMaps` above, for devtools), so unlike
+  // the old `hideSourceMaps` we do NOT delete them after upload.
   sourcemaps: {
-    disable: true,
+    deleteSourcemapsAfterUpload: false,
   },
-
-  // Automatically tree-shake Sentry logger statements to reduce bundle size
-  disableLogger: true,
 
   // Enables automatic instrumentation of Vercel Cron Monitors. (Does not yet work with App Router route handlers.)
   // See the following for more information:
   // https://docs.sentry.io/product/crons/
   // https://vercel.com/docs/cron-jobs
   automaticVercelMonitors: false,
-});
+
+  webpack: {
+    // Automatically annotate React components to show their full name in breadcrumbs and session replay.
+    reactComponentAnnotation: {
+      enabled: true,
+    },
+
+    // Automatically tree-shake Sentry logger statements to reduce bundle size.
+    treeshake: {
+      removeDebugLogging: true,
+    },
+  },
+  });
 
 export default sentryConfig;
