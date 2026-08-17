@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)"
+    ],
+    "deny": []
+  },
+  "enableAllProjectMcpServers": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport json,re,sys\nd=json.load(sys.stdin)\ncmd=d.get('tool_input',{}).get('command','')\nif re.search(r'(^|;|&&|\\|)\\s*git\\s+(fetch|pull)\\b.*\\bupstream\\b', cmd):\n    if '--no-tags' not in cmd or not re.search(r'\\bmain\\b', cmd):\n        print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'git fetch/pull from the upstream remote must target only main and include --no-tags (see .claude/rules/git-upstream-fetch.md)'}}))\n\""
+          }
+        ]
+      }
+    ]
+  }
+}
