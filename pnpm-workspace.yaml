@@ -143,6 +143,14 @@ overrides:
   # @ag-ui/mastra imports parsePartialJson from @ai-sdk/ui-utils, whose module
   # evaluation needs exports (validatorSymbol) that only exist in its own
   # provider-utils 2.x line — exempt it from the blanket 4.0.33 lift above.
+  # ACCEPTED RISK: this keeps CVE-2026-8769 (uncontrolled resource consumption,
+  # first fixed in 3.0.28) on the worker image. Lifting this path to 3.0.28 was
+  # tested and fails at module load:
+  #   SyntaxError: The requested module '@ai-sdk/provider-utils' does not
+  #   provide an export named 'validatorSymbol'
+  # 3.x still declares validatorSymbol in its .d.ts but dropped it from the
+  # runtime export list, so a type check cannot catch this — do not re-attempt
+  # without importing @ag-ui/mastra in node first.
   "@ai-sdk/ui-utils>@ai-sdk/provider-utils": 2.2.8
   # addon-vitest accepts any @vitest/browser ^3 || ^4 as an optional peer, so
   # pnpm keeps the already-resolved 4.1.10 copy, which pulls in a vulnerable
