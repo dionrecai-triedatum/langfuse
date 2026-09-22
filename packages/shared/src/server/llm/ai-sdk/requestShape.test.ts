@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { encrypt } from "../../../encryption";
+import { env } from "../../../env";
+import { VERTEXAI_USE_DEFAULT_CREDENTIALS } from "../../../interfaces/customLLMProviderConfigSchemas";
 import {
   type ChatMessage,
   ChatMessageRole,
@@ -9,6 +11,7 @@ import {
   type ModelParams,
   type TraceSinkParams,
 } from "../types";
+import { generateLangfuseAIText } from "../langfuseAiCompletion";
 import {
   createLLMOutput,
   generateLLMText,
@@ -259,6 +262,43 @@ describe("AI SDK request shapes", () => {
     expect(request.url).toBe("https://api.openai.com/v1/responses");
     expect(request.headers.get("authorization")).toBe("Bearer sk-test");
     expect(request.body.model).toBe("gpt-4o");
+  });
+
+  it("Langfuse AI first-party OpenAI credentials hit /v1/responses", async () => {
+    const original = {
+      LANGFUSE_AI_PROVIDER: env.LANGFUSE_AI_PROVIDER,
+      LANGFUSE_AI_MODEL: env.LANGFUSE_AI_MODEL,
+      LANGFUSE_AI_SMALL_MODEL: env.LANGFUSE_AI_SMALL_MODEL,
+      LANGFUSE_AI_API_KEY: env.LANGFUSE_AI_API_KEY,
+      LANGFUSE_AI_BASE_URL: env.LANGFUSE_AI_BASE_URL,
+      LANGFUSE_AI_USE_RESPONSES_API: env.LANGFUSE_AI_USE_RESPONSES_API,
+    };
+    Object.assign(env, {
+      LANGFUSE_AI_PROVIDER: "openai",
+      LANGFUSE_AI_MODEL: "gpt-5.6-sol",
+      LANGFUSE_AI_SMALL_MODEL: "gpt-5.6-luna",
+      LANGFUSE_AI_API_KEY: "sk-test",
+      LANGFUSE_AI_BASE_URL: undefined,
+      LANGFUSE_AI_USE_RESPONSES_API: undefined,
+    });
+
+    try {
+      const { calls, fetch } = createCaptureFetch(OPENAI_RESPONSES_RESPONSE);
+      vi.stubGlobal("fetch", fetch);
+
+      const text = await generateLangfuseAIText({
+        messages,
+        timeout: 10_000,
+      });
+
+      expect(text).toBe("ok");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe("https://api.openai.com/v1/responses");
+      expect(calls[0]?.headers.get("authorization")).toBe("Bearer sk-test");
+      expect(calls[0]?.body.model).toBe("gpt-5.6-sol");
+    } finally {
+      Object.assign(env, original);
+    }
   });
 
   it("OpenAI-compatible chat completions: preserves custom provider options on the wire", async () => {
@@ -622,6 +662,90 @@ describe("AI SDK request shapes", () => {
     expect(request.body.anthropic_version).toBeTruthy();
     expect(request.body.model).toBeUndefined();
     expect(request.body.max_tokens).toBe(128);
+  });
+
+  // Vertex reaches application default credentials through two independent
+  // gates: the ADC sentinel in place of a key, and a credential source that is
+  // allowed to spend the server's own identity. The pair below pins both
+  // directions of that gate, because widening it hands a tenant connection the
+  // Langfuse deployment's GCP identity and narrowing it silently disables
+  // instance-wide Vertex wherever the Cloud region is set.
+  it("Langfuse AI Vertex resolves the project from ADC, Cloud region notwithstanding", async () => {
+    const original = {
+      LANGFUSE_AI_PROVIDER: env.LANGFUSE_AI_PROVIDER,
+      LANGFUSE_AI_MODEL: env.LANGFUSE_AI_MODEL,
+      LANGFUSE_AI_SMALL_MODEL: env.LANGFUSE_AI_SMALL_MODEL,
+      LANGFUSE_AI_VERTEX_LOCATION: env.LANGFUSE_AI_VERTEX_LOCATION,
+      NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION,
+    };
+    Object.assign(env, {
+      LANGFUSE_AI_PROVIDER: "vertex",
+      LANGFUSE_AI_MODEL: "claude-sonnet-4-5@20250929",
+      LANGFUSE_AI_SMALL_MODEL: undefined,
+      LANGFUSE_AI_VERTEX_LOCATION: "us-east5",
+      NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: "eu",
+    });
+
+    try {
+      const { calls, fetch } = createCaptureFetch(ANTHROPIC_RESPONSE);
+      vi.stubGlobal("fetch", fetch);
+
+      const text = await generateLangfuseAIText({
+        messages,
+        maxTokens: 128,
+        timeout: 10_000,
+      });
+
+      expect(text).toBe("ok");
+      expect(calls).toHaveLength(1);
+      // The project comes from the credential chain, never from configuration,
+      // and the location comes from the instance env rather than a connection.
+      expect(decodeURIComponent(calls[0]?.url ?? "")).toBe(
+        "https://us-east5-aiplatform.googleapis.com/v1/projects/adc-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-5@20250929:rawPredict",
+      );
+      expect(calls[0]?.headers.get("authorization")).toBe(
+        "Bearer fake-gcp-token",
+      );
+    } finally {
+      Object.assign(env, original);
+    }
+  });
+
+  it("a tenant Vertex connection cannot spend ADC on Langfuse Cloud", async () => {
+    const original = {
+      NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION,
+    };
+    Object.assign(env, { NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: "eu" });
+
+    try {
+      const { calls, fetch } = createCaptureFetch(GOOGLE_RESPONSE);
+      vi.stubGlobal("fetch", fetch);
+
+      await expect(
+        generateLLMText({
+          ...mapLegacyLLMCompletionParams({
+            messages,
+            modelParams: {
+              provider: "vertex",
+              adapter: LLMAdapter.VertexAI,
+              model: "gemini-2.5-flash",
+            },
+            connection: {
+              secretKey: encrypt(VERTEXAI_USE_DEFAULT_CREDENTIALS),
+              config: { location: "us-east5" },
+            },
+            credentialSource: "user",
+          }),
+          timeout: 10_000,
+        }),
+      ).rejects.toThrow();
+
+      // The sentinel must not fall back to the server's identity: no request
+      // may leave carrying the deployment's ADC project.
+      expect(calls).toHaveLength(0);
+    } finally {
+      Object.assign(env, original);
+    }
   });
 
   // The Bedrock builder deliberately uses no custom fetch (VPC endpoints),

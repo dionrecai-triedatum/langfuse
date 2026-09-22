@@ -1,3 +1,4 @@
+import { testFeatureFlags } from "@/src/__tests__/fixtures/feature-flags";
 import { randomUUID } from "crypto";
 import type { Session } from "next-auth";
 import type { NextApiRequest, NextApiResponse } from "next";
@@ -9,7 +10,7 @@ import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/cr
 import {
   createInAppAgentToolPolicy,
   filterInAppAgentAvailableLangfuseMcpTools,
-} from "@langfuse/shared/in-app-agent/server/tools";
+} from "@langfuse/shared/in-app-agent/server/mcpPolicy";
 import { prisma } from "@langfuse/shared/src/db";
 import {
   createAndAddApiKeysToDb,
@@ -54,6 +55,7 @@ describe("in-app agent public API route auth", () => {
   async function callRoute(params: { allowInAppAgentKey?: boolean }) {
     const handler = createAuthedProjectAPIRoute({
       name: "Test Route",
+      action: "project:read",
       ...(params.allowInAppAgentKey === undefined
         ? {}
         : { allowInAppAgentKey: params.allowInAppAgentKey }),
@@ -81,6 +83,7 @@ describe("in-app agent public API route auth", () => {
     expect(res._getJSONData()).toEqual({
       message:
         "Access denied - in-app agent keys are not allowed for this endpoint",
+      error: "UnauthorizedError",
     });
   });
 
@@ -91,6 +94,7 @@ describe("in-app agent public API route auth", () => {
     expect(res._getJSONData()).toEqual({
       message:
         "Access denied - in-app agent keys are not allowed for this endpoint",
+      error: "UnauthorizedError",
     });
   });
 
@@ -349,7 +353,7 @@ function createInAppAgentSession(params: {
       email: "test@example.com",
       image: null,
       admin: false,
-      featureFlags: {},
+      featureFlags: testFeatureFlags({ templateFlag: false }),
       organizations:
         (params.includeProjectMembership ?? true)
           ? [
@@ -383,12 +387,12 @@ function createInAppAgentSession(params: {
 
 async function withInAppAgentCloudEnv<T>(run: () => Promise<T>): Promise<T> {
   const originalCloudRegion = env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
-  const originalBedrockModel = env.LANGFUSE_AWS_BEDROCK_MODEL;
+  const originalBedrockModel = env.LANGFUSE_AI_MODEL;
   const originalAiFeaturesPublicKey = env.LANGFUSE_AI_FEATURES_PUBLIC_KEY;
   const originalAiFeaturesSecretKey = env.LANGFUSE_AI_FEATURES_SECRET_KEY;
 
   (env as any).NEXT_PUBLIC_LANGFUSE_CLOUD_REGION = "DEV";
-  (env as any).LANGFUSE_AWS_BEDROCK_MODEL = "test-model";
+  (env as any).LANGFUSE_AI_MODEL = "test-model";
   (env as any).LANGFUSE_AI_FEATURES_PUBLIC_KEY = "pk-lf-test";
   (env as any).LANGFUSE_AI_FEATURES_SECRET_KEY = "sk-lf-test";
 
@@ -396,7 +400,7 @@ async function withInAppAgentCloudEnv<T>(run: () => Promise<T>): Promise<T> {
     return await run();
   } finally {
     (env as any).NEXT_PUBLIC_LANGFUSE_CLOUD_REGION = originalCloudRegion;
-    (env as any).LANGFUSE_AWS_BEDROCK_MODEL = originalBedrockModel;
+    (env as any).LANGFUSE_AI_MODEL = originalBedrockModel;
     (env as any).LANGFUSE_AI_FEATURES_PUBLIC_KEY = originalAiFeaturesPublicKey;
     (env as any).LANGFUSE_AI_FEATURES_SECRET_KEY = originalAiFeaturesSecretKey;
   }

@@ -1,35 +1,10 @@
+/* eslint-disable no-nested-ternary */
 import { z } from "zod";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
-import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
+import { throwIfNoProjectAccess } from "@/src/features/rbac";
 import { aggregateScores } from "@/src/features/scores/lib/aggregateScores";
-import { applyCommentFilters } from "@langfuse/shared/src/server";
 import {
-  createTRPCRouter,
-  protectedGetTraceProcedure,
-  protectedProjectProcedure,
-} from "@/src/server/api/trpc";
-import {
-  BatchActionQuerySchema,
-  BatchTableNames,
-  BatchExportTableName,
-  BatchActionType,
-  ActionId,
-  filterAndValidateDbScoreList,
-  normalizeOrderByForTable,
-  orderBy,
-  paginationZod,
-  singleFilter,
-  timeFilter,
-  type Observation,
-  hasValidTracingSearchTypes,
-  TRACING_SEARCH_TYPE_REQUIRED_MESSAGE,
-  TracingSearchType,
-  type ScoreDomain,
-  ScoreDataTypeArray,
-  ScoreDataTypeEnum,
-  LISTABLE_SCORE_TYPES,
-} from "@langfuse/shared";
-import {
+  applyCommentFilters,
   traceException,
   getTracesTable,
   getTracesTableCount,
@@ -55,8 +30,34 @@ import {
   updateEvents,
   getScoresAndCorrectionsForTraces,
 } from "@langfuse/shared/src/server";
+import {
+  createTRPCRouter,
+  protectedGetTraceProcedure,
+  protectedProjectProcedure,
+} from "@/src/server/api/trpc";
+import {
+  BatchActionQuerySchema,
+  BatchTableNames,
+  BatchExportTableName,
+  BatchActionType,
+  ActionId,
+  filterAndValidateDbScoreList,
+  normalizeOrderByForTable,
+  orderBy,
+  paginationZod,
+  singleFilterList,
+  timeFilter,
+  type Observation,
+  hasValidTracingSearchTypes,
+  TRACING_SEARCH_TYPE_REQUIRED_MESSAGE,
+  TracingSearchType,
+  type ScoreDomain,
+  ScoreDataTypeArray,
+  ScoreDataTypeEnum,
+  LISTABLE_SCORE_TYPES,
+} from "@langfuse/shared";
 import { TRPCError } from "@trpc/server";
-import { createBatchActionJob } from "@/src/features/table/server/createBatchActionJob";
+import { createBatchActionJob } from "@/src/features/table/server";
 import { throwIfNoEntitlement } from "@/src/features/entitlements/server/hasEntitlement";
 import { sanitizeLegacyTracingSearch } from "@/src/features/traces/server/legacyIoSearch";
 import {
@@ -76,7 +77,7 @@ const TraceCountOptions = z
     projectId: z.string(), // Required for protectedProjectProcedure
     searchQuery: z.string().nullable(),
     searchType: z.array(TracingSearchType),
-    filter: z.array(singleFilter).nullable(),
+    filter: singleFilterList.nullable(),
     orderBy: orderBy,
   })
   .refine(hasValidTracingSearchTypes, {
@@ -207,7 +208,7 @@ export const traceRouter = createTRPCRouter({
       z.object({
         projectId: z.string(),
         traceIds: z.array(z.string()),
-        filter: z.array(singleFilter).nullable(),
+        filter: singleFilterList.nullable(),
       }),
     )
     .query(async ({ input, ctx }) => {
@@ -264,8 +265,6 @@ export const traceRouter = createTRPCRouter({
       const traceScores = await getScoresForTraces({
         projectId: ctx.session.projectId,
         traceIds: res.map((r) => r.id),
-        limit: 1000,
-        offset: 0,
         excludeMetadata: true,
         includeHasMetadata: true,
       });

@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary */
 import { BotMessageSquare, Wrench } from "lucide-react";
 import { useState } from "react";
 import {
@@ -9,14 +10,14 @@ import {
   DialogTitle,
 } from "@/src/components/ui/dialog";
 import { Button } from "@/src/components/ui/button";
-import { CodeBlock } from "@/src/components/design-system/Codeblock/Codeblock";
+import { Codeblock as CodeBlock } from "@/src/components/design-system/Codeblock/Codeblock";
 import {
-  useCanUseInAppAgent,
+  useIsInAppAgentLauncherVisible,
   useInAppAiAgent,
 } from "@/src/features/in-app-agent/components/InAppAiAgentProvider";
-import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
 import { useQueryProjectOrOrganization } from "@/src/features/projects/hooks";
-import { useHasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
+import { useHasOrganizationAccess } from "@/src/features/rbac";
 
 type EvaluatorMigrationScope = { type: "all" } | { type: "single" };
 
@@ -27,6 +28,10 @@ type EvaluatorMigrationDialogProps = {
   assistantPrompt: string;
   onManualUpgrade: () => void;
   onAssistantStarted: () => void;
+  /** Opens the dialog with this action already selected, skipping the
+   *  choice screen. Only honored while AI features are enabled — otherwise
+   *  the choice screen keeps owning the enable-AI and admin-handoff flows. */
+  initialAction?: SelectedMigrationAction;
 };
 
 type SelectedMigrationAction = "assistant";
@@ -41,8 +46,9 @@ export function EvaluatorMigrationDialog({
   assistantPrompt,
   onManualUpgrade,
   onAssistantStarted,
+  initialAction,
 }: EvaluatorMigrationDialogProps) {
-  const canUseAssistant = useCanUseInAppAgent();
+  const isInAppAgentLauncherVisible = useIsInAppAgentLauncherVisible();
   const { organization } = useQueryProjectOrOrganization();
   const { openAssistant, submit } = useInAppAiAgent();
   const canUpdateOrgSettings = useHasOrganizationAccess({
@@ -55,7 +61,15 @@ export function EvaluatorMigrationDialog({
 
   const aiFeaturesEnabled = Boolean(organization?.aiFeaturesEnabled);
   const isSingleEvaluator = scope.type === "single";
-  const showAssistantOption = canUseAssistant;
+  const showAssistantOption = isInAppAgentLauncherVisible;
+  // With AI features disabled, the choice screen's assistant option owns the
+  // enable-AI and admin-handoff side effects, so the preselect only applies
+  // once the assistant can actually start.
+  const effectiveAction =
+    selectedAction ??
+    (initialAction === "assistant" && showAssistantOption && aiFeaturesEnabled
+      ? "assistant"
+      : null);
 
   const capture = usePostHogClientCapture();
   const startAssistant = async () => {
@@ -108,7 +122,7 @@ export function EvaluatorMigrationDialog({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {selectedAction === "assistant"
+              {effectiveAction === "assistant"
                 ? "Ready to start your evaluator upgrade?"
                 : isSingleEvaluator
                   ? "How would you like to upgrade this evaluator?"
@@ -116,7 +130,7 @@ export function EvaluatorMigrationDialog({
             </DialogTitle>
           </DialogHeader>
           <DialogBody className="gap-3">
-            {selectedAction === "assistant" ? (
+            {effectiveAction === "assistant" ? (
               <p className="text-muted-foreground text-sm">
                 {aiFeaturesEnabled
                   ? "The Assistant will review your deprecated evaluators and suggest upgrading all of them at once."
@@ -158,9 +172,8 @@ export function EvaluatorMigrationDialog({
                         "Open the evaluator upgrade form."
                       ) : (
                         <>
-                          Click evaluators with the Deprecated label to review{" "}
-                          <br />
-                          them and start each upgrade individually.
+                          Click the Upgrade now button on an evaluator to <br />
+                          review it and start each upgrade individually.
                         </>
                       )}
                     </span>
@@ -169,17 +182,21 @@ export function EvaluatorMigrationDialog({
               </>
             )}
           </DialogBody>
-          {selectedAction ? (
+          {effectiveAction ? (
             <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  setSelectedAction(null);
-                }}
-              >
-                Back
-              </Button>
+              {/* Back returns to the choice screen; when the dialog opened
+                  preselected there is no choice screen to go back to. */}
+              {selectedAction ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setSelectedAction(null);
+                  }}
+                >
+                  Back
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 onClick={startAssistant}

@@ -87,6 +87,9 @@ web/test-results/*
 # Local DeepSec workspace and generated scan state
 .deepsec/
 
+# Fork CVE scan scratch output (see .claude/rules/fork-cve-patching.md)
+.scratch/
+
 .mcp.json
 .claude/settings.json
 .claude/skills/
@@ -112,6 +115,9 @@ web/test-results/*
 
 # Local overrides for AGENTS.md
 **/AGENTS.override.md
+
+# Local agent scratch (never commit)
+.langfuse/
 
 # Superset config
 .superset/

@@ -14,12 +14,16 @@ import { cva } from "class-variance-authority";
 
 import type { ScoreTypeContext } from "@/src/features/search-bar/lib/adapter";
 import {
+  EVENTS_FIELD_REGISTRY,
+  type FieldRegistry,
+} from "@/src/features/search-bar/lib/fields";
+import {
   deriveComposerSegments,
   type FilterSegment,
 } from "@/src/features/search-bar/lib/composer-segments";
 import { indexOfOutsideQuotes } from "@/src/features/search-bar/lib/langQ";
 import { deactivationReason } from "@/src/features/search-bar/components/presentation";
-import { FilterToken } from "@/src/features/filters/components/FilterToken";
+import { FilterToken } from "@/src/features/filters";
 
 // Word joiner around pills: gives the DOM caret boundaries between tokens
 // without changing the query text. Stripped before the text reaches the model
@@ -34,7 +38,7 @@ export const WORD_JOINER = "⁠";
 // text caret to the inline box of the pill it sits in/next to, so taller pills
 // produce a caret that towers over the text. py-0.5 keeps the chip readable
 // while holding the Safari caret close to the text height.
-export const composerTokenVariants = cva("max-w-full", {
+const composerTokenVariants = cva("max-w-full", {
   variants: {
     kind: {
       filter: "",
@@ -59,11 +63,14 @@ export const composerTokenVariants = cva("max-w-full", {
 type TokenKind = "filter" | "freeText" | "operator" | "paren" | "invalid";
 
 function renderPlainText(text: string, keyPrefix: string): React.ReactNode[] {
+  // Element wrappers, not fragments: an IME writes into whatever text node
+  // the caret sits in, and React will not rewrite a fragment-emitted node
+  // whose last rendered value is still `" "`. A span is a node React owns,
+  // so compositionend can remount it instead of leaving a stuck sibling.
   return text
     .split(/(\s+)/)
-    .map((part, index) => (
-      <React.Fragment key={`${keyPrefix}:${index}`}>{part}</React.Fragment>
-    ));
+    .filter((part) => part.length > 0)
+    .map((part, index) => <span key={`${keyPrefix}:${index}`}>{part}</span>);
 }
 
 function FilterTokenBody({ segment }: { segment: FilterSegment }) {
@@ -118,6 +125,7 @@ export function ComposerTokens({
   fieldReason,
   freeTextReason,
   highlightedSegmentId,
+  registry = EVENTS_FIELD_REGISTRY,
 }: {
   draft: string;
   showDiagnostics: boolean;
@@ -134,8 +142,9 @@ export function ComposerTokens({
   /** Reason a free-text token is not applied (e.g. charts ignore full-text
    *  search), or null/undefined to leave it active. */
   freeTextReason?: string | null;
+  registry?: FieldRegistry;
 }): React.ReactNode {
-  const segments = deriveComposerSegments(draft, scoreTypes);
+  const segments = deriveComposerSegments(draft, scoreTypes, registry);
   const out: React.ReactNode[] = [];
   let cursor = 0;
   for (const segment of segments) {

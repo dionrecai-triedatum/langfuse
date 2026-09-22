@@ -1,3 +1,4 @@
+import { testFeatureFlags } from "@/src/__tests__/fixtures/feature-flags";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---- Hoisted mocks ----
@@ -680,14 +681,7 @@ function buildOwnerSession(orgId: string): Session {
           projects: [],
         },
       ],
-      featureFlags: {
-        searchBar: false,
-        excludeClickhouseRead: false,
-        templateFlag: true,
-        v4BetaToggleVisible: false,
-        observationEvals: false,
-        experimentsV4Enabled: false,
-      },
+      featureFlags: testFeatureFlags(),
       admin: false,
     },
     environment: {
@@ -860,7 +854,10 @@ describe("call site: tRPC organizations.create", () => {
       .mockResolvedValueOnce(emptyOkResponse())
       .mockResolvedValueOnce(emptyOkResponse());
 
-    await createOwnerCaller("org-1").organizations.create({ name: "New Org" });
+    await createOwnerCaller("org-1").organizations.create({
+      name: "New Org",
+      aiFeaturesEnabled: true,
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
