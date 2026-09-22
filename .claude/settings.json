@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c \"\nimport json,re,sys\nd=json.load(sys.stdin)\ncmd=d.get('tool_input',{}).get('command','')\nif re.search(r'(^|;|&&|\\|)\\s*git\\s+(fetch|pull)\\b.*\\bupstream\\b', cmd):\n    if '--no-tags' not in cmd or not re.search(r'\\bmain\\b', cmd):\n        print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'git fetch/pull from the upstream remote must target only main and include --no-tags (see .claude/rules/git-upstream-fetch.md)'}}))\n\""
+            "command": "python3 -c \"\nimport json,re,sys\nd=json.load(sys.stdin)\ncmd=d.get('tool_input',{}).get('command','')\nif re.search(r'(^|;|&&|\\|)\\s*git\\s+(fetch|pull)\\b.*\\bupstream\\b', cmd):\n    if '--no-tags' not in cmd or not re.search(r'\\bmain\\b|refs/tags/', cmd):\n        print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'git fetch/pull from the upstream remote must pass --no-tags and target either main or an explicit refs/tags/<tag> refspec (see .claude/rules/fork-cve-patching.md)'}}))\n\""
           }
         ]
       }
