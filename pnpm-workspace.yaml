@@ -151,6 +151,11 @@ overrides:
   # 3.x still declares validatorSymbol in its .d.ts but dropped it from the
   # runtime export list, so a type check cannot catch this — do not re-attempt
   # without importing @ag-ui/mastra in node first.
+  # Nor can we bump past the problem: @ai-sdk/ui-utils is abandoned (1.2.11,
+  # 2025-05-07) and exact-pins provider-utils 2.2.8, the last 2.x release, which
+  # never got a backport. @ag-ui/mastra 1.1.4 has the same deps as 1.1.1, and
+  # @mastra/client-js pulls ui-utils independently. See "Accepted risks" in
+  # .claude/rules/fork-cve-patching.md.
   "@ai-sdk/ui-utils>@ai-sdk/provider-utils": 2.2.8
   # addon-vitest accepts any @vitest/browser ^3 || ^4 as an optional peer, so
   # pnpm keeps the already-resolved 4.1.10 copy, which pulls in a vulnerable
