@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary */
 import { OrderByState } from "../../interfaces/orderBy";
 import { scoreBooleansAggregation } from "../queries/clickhouse-sql/query-fragments";
 import { tracesTableUiColumnDefinitions } from "../tableMappings";
@@ -111,7 +112,10 @@ export const convertToUiTableRows = (
 export const convertToUITableMetrics = (
   row: TracesTableMetricsClickhouseReturnType,
 ): Omit<TracesMetricsUiReturnType, "scores"> => {
+  // Both are aggregates, not raw buckets: reduceUsageOrCostDetails sums every
+  // bucket whose key contains "input"/"output"
   const usageDetails = reduceUsageOrCostDetails(row.usage_details);
+  const costDetails = reduceUsageOrCostDetails(row.cost_details);
 
   return {
     id: row.id,
@@ -136,11 +140,11 @@ export const convertToUITableMetrics = (
     calculatedTotalCost: row.cost_details?.total
       ? new Decimal(row.cost_details.total)
       : null,
-    calculatedInputCost: row.cost_details?.input
-      ? new Decimal(row.cost_details.input)
+    calculatedInputCost: costDetails.input
+      ? new Decimal(costDetails.input)
       : null,
-    calculatedOutputCost: row.cost_details?.output
-      ? new Decimal(row.cost_details.output)
+    calculatedOutputCost: costDetails.output
+      ? new Decimal(costDetails.output)
       : null,
     level: row.level,
     debugCount: BigInt(row.debug_count ?? 0),

@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary */
 import React from "react";
 import { Button } from "@/src/components/ui/button";
 import {
@@ -110,7 +111,7 @@ export const CorrectedOutputDiffDialog: React.FC<
               </div>
               <div>
                 <p className="mb-1 text-sm font-bold">Corrected Output</p>
-                <pre className="bg-muted/30 max-h-[50vh] overflow-auto rounded-md border p-3 text-xs break-words whitespace-pre-wrap">
+                <pre className="ph-no-capture bg-muted/30 max-h-[50vh] overflow-auto rounded-md border p-3 text-xs break-words whitespace-pre-wrap">
                   {formattedCorrectedOutput}
                 </pre>
               </div>
@@ -125,7 +126,7 @@ export const CorrectedOutputDiffDialog: React.FC<
               </div>
             </div>
           ) : (
-            <div className="space-y-4">
+            <div className="ph-no-capture space-y-4">
               <DiffViewer
                 oldString={formattedActualOutput}
                 newString={formattedCorrectedOutput}

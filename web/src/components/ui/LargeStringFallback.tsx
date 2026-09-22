@@ -3,7 +3,7 @@ import { Download } from "lucide-react";
 import { Button } from "@/src/components/ui/button";
 import { compactNumberFormatter } from "@/src/utils/numbers";
 import { LARGE_STRING_PREVIEW_CHARS } from "@/src/components/ui/largeStringGate";
-import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
 import { decodeUnicodeInJson } from "@/src/utils/decodeUnicodeInJson";
 
 /**
@@ -56,7 +56,7 @@ export function LargeStringFallback({
   };
 
   return (
-    <div className="io-message-content">
+    <div className="io-message-content ph-no-capture">
       <div className="my-2 flex flex-col gap-2 rounded-sm border border-dashed p-3">
         <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
           {title ? (

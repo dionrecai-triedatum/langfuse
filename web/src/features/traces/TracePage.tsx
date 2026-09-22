@@ -1,4 +1,5 @@
-import { DetailPageNav } from "@/src/features/navigate-detail-pages/DetailPageNav";
+/* eslint-disable no-nested-ternary */
+import { DetailPageNav } from "@/src/features/navigate-detail-pages";
 import { useRouter } from "next/router";
 import { ErrorPage } from "@/src/components/error-page";
 import { TraceDetailActions } from "@/src/features/traces/components/TraceDetailActions";
@@ -7,7 +8,7 @@ import Page from "@/src/components/layouts/page";
 import { TraceDetailBody } from "@/src/features/traces/components/TraceDetailBody";
 import { traceDetailTitle } from "@/src/features/traces/fns/traceDetailTitle";
 import { useSession } from "next-auth/react";
-import { useIsAuthenticatedAndProjectMember } from "@/src/features/auth/hooks";
+import { useIsAuthenticatedAndProjectMember } from "@/src/features/auth";
 import { Button } from "@/src/components/ui/button";
 import Link from "next/link";
 import { stripBasePath } from "@/src/utils/redirect";
@@ -134,7 +135,6 @@ export function TracePage({
             <TraceDetailActions
               traceId={trace.data.id}
               projectId={trace.data.projectId}
-              bookmarked={trace.data.bookmarked}
               isPublic={trace.data.public}
               name={trace.data.name}
               timestamp={timestamp}
@@ -143,13 +143,12 @@ export function TracePage({
           </>
         ),
         // Mobile compact header: the same trace actions as full-width labeled
-        // menu rows (Bookmark / Share / Delete) for the `⋯` overflow, instead
-        // of the inline icon toolbar. Trace-to-trace nav is desktop-only.
+        // menu rows (Share / Delete) for the `⋯` overflow, instead of the
+        // inline icon toolbar. Trace-to-trace nav is desktop-only.
         actionButtonsMenu: (
           <TraceDetailActions
             traceId={trace.data.id}
             projectId={trace.data.projectId}
-            bookmarked={trace.data.bookmarked}
             isPublic={trace.data.public}
             name={trace.data.name}
             timestamp={timestamp}

@@ -15,15 +15,18 @@ Peek views allow users to quickly preview table items in a side panel. When navi
   table behind stays interactive. A left-edge handle resizes it; dragging to the
   far edge (or the header Expand button) **expands** it to the max width
   (viewport − sidebar; the sidebar stays visible).
-- **Mobile** (`useIsMobile`, <768px) — a `vaul` bottom drawer with native
-  swipe-down dismissal (Expand is hidden).
+- **Handheld** (`useIsHandheld` — narrower than `md`, _or_ a coarse pointer on a
+  short screen, i.e. a phone in landscape) — a `vaul` bottom drawer with native
+  swipe-down dismissal (Expand is hidden). Not width-only: a landscape phone is
+  wider than `md` and would otherwise get the desktop sheet.
 
 Dismissal:
 
 - **Click-outside closes**, with exceptions: a target inside the peek
   (`[data-peek-content]`) never closes it; clicking another table row
   (`[data-row-index]`) **switches** the peeked item in place; and selection
-  checkboxes / `data-ignore-outside-interaction` regions / the table's
+  checkboxes / `data-ignore-outside-interaction` regions / toast-layer overlays
+  (`[data-layer="toast"]`, e.g. the version-update banner) / the table's
   `ignoredSelectors` don't close it. Nested Radix popovers/menus opened inside
   the peek don't close it (DismissableLayer stacking).
 - **Escape**, the close button, and (mobile) swipe-down also close.
@@ -160,7 +163,7 @@ exception and must be wired explicitly by the caller.
    - Automatically detects peek context and uses it if available
 
 4. **`useFullTextSearch`** - Manages search query state
-   - Location: `web/src/components/table/use-cases/useFullTextSearch.tsx`
+   - Location: `web/src/features/search-bar/hooks/useFullTextSearch.ts`
    - Handles both search query and search type state
 
 ## Behavior
@@ -383,6 +386,6 @@ const filters = useSidebarFilterState(config, options, queryFilterOptions);
 
 - Peek state context: [`contexts/PeekTableStateContext.tsx`](./contexts/PeekTableStateContext.tsx)
 - Pagination hook: [`web/src/hooks/usePaginationState.ts`](../../../hooks/usePaginationState.ts)
-- Full text search hook: [`use-cases/useFullTextSearch.tsx`](../use-cases/useFullTextSearch.tsx)
+- Full text search hook: [`search-bar/hooks/useFullTextSearch.ts`](../../../features/search-bar/hooks/useFullTextSearch.ts)
 - Filter state hook: [`web/src/features/filters/hooks/useSidebarFilterState.tsx`](../../../features/filters/hooks/useSidebarFilterState.tsx)
 - Order by hook: [`web/src/features/orderBy/hooks/useOrderByState.ts`](../../../features/orderBy/hooks/useOrderByState.ts)

@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary */
 import {
   commandClickhouse,
   parseClickhouseUTCDateTimeFormat,
@@ -1222,7 +1223,7 @@ const buildTracesForBlobStorageExportQuery = (
     FROM ${traceTable} FINAL
     WHERE project_id = {projectId: String}
     AND timestamp >= {minTimestamp: DateTime64(3)}
-    AND timestamp <= {maxTimestamp: DateTime64(3)}
+    AND timestamp < {maxTimestamp: DateTime64(3)}
   `;
 
   return {
@@ -1385,6 +1386,7 @@ export const getTracesByIdsForAnyProject = async (traceIds: string[]) => {
     params: {
       traceIds,
     },
+    tags: { surface: "ssr", route: "trace_redirect" },
   });
 
   return records.map((record) => ({

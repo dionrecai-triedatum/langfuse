@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary */
 import React, { useCallback, useMemo, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { type DashboardWidgetChartType } from "@langfuse/shared/src/db";
@@ -19,6 +20,7 @@ import {
   coerceConfig,
   DEFAULT_CONFIG,
   describeConfig,
+  getMetric,
   isTimeSeriesChartType,
 } from "@/src/features/chart-view/vocab";
 import {
@@ -33,7 +35,7 @@ import {
 import { aggregateEvents } from "../lib/aggregate";
 import { MockEventsTable } from "./MockEventsTable";
 
-export type ChartViewAffordance = "inline" | "panel";
+type ChartViewAffordance = "inline" | "panel";
 
 export interface ChartViewPrototypeProps {
   events: PrototypeEvent[];
@@ -189,7 +191,15 @@ function InlineTake({
           {describeConfig(config)}
         </div>
         <div className="min-h-0 flex-1">
-          <ChartCanvas data={data} config={config} />
+          <ChartCanvas
+            data={data}
+            chartType={config.chartType}
+            breakdown={config.breakdown}
+            aggregation={config.aggregation}
+            metricLabel={getMetric(config.metric).label}
+            metricUnit={getMetric(config.metric).unit}
+            emptyMessage="No events match the current filters."
+          />
         </div>
       </div>
     </div>
