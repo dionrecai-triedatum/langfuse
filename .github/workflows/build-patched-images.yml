@@ -52,6 +52,10 @@ jobs:
         with:
           name: patched-lockfile
 
+      - name: Resolve Langfuse version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -67,7 +71,9 @@ jobs:
           context: .
           file: ./web/Dockerfile
           push: true
-          tags: dionrecai909td/langfuse:latest
+          tags: |
+            dionrecai909td/langfuse:latest
+            dionrecai909td/langfuse:${{ steps.version.outputs.version }}
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 
@@ -84,6 +90,10 @@ jobs:
         with:
           name: patched-lockfile
 
+      - name: Resolve Langfuse version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -99,6 +109,8 @@ jobs:
           context: .
           file: ./worker/Dockerfile
           push: true
-          tags: dionrecai909td/langfuse-worker:latest
+          tags: |
+            dionrecai909td/langfuse-worker:latest
+            dionrecai909td/langfuse-worker:${{ steps.version.outputs.version }}
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
