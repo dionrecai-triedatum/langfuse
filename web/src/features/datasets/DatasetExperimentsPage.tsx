@@ -12,20 +12,20 @@ import {
   DialogTrigger,
 } from "@/src/components/ui/dialog";
 import { Button } from "@/src/components/ui/button";
-import { CreateExperimentsForm } from "@/src/features/experiments/components/CreateExperimentsForm";
-import { showSuccessToast } from "@/src/features/notifications/showSuccessToast";
+import {
+  CreateExperimentsForm,
+  useEvaluatorDefaults,
+  useExperimentEvaluatorData,
+  useExperimentAccess,
+  singleRunToExperimentsUrl,
+} from "@/src/features/experiments";
+import { showSuccessToast } from "@/src/features/notifications";
 import { DatasetAnalytics } from "@/src/features/datasets/components/DatasetAnalytics";
-import { RESOURCE_METRICS } from "@/src/features/dashboard/lib/score-analytics-utils";
+import { RESOURCE_METRICS } from "@/src/features/dashboard";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
 import Page from "@/src/components/layouts/page";
-import {
-  getDatasetTabs,
-  DATASET_TABS,
-} from "@/src/features/navigation/utils/dataset-tabs";
+import { getDatasetTabs, DATASET_TABS } from "@/src/features/navigation";
 import { TemplateSelector } from "@/src/features/evals/components/template-selector";
-import { useEvaluatorDefaults } from "@/src/features/experiments/hooks/useEvaluatorDefaults";
-import { useExperimentEvaluatorData } from "@/src/features/experiments/hooks/useExperimentEvaluatorData";
-import { useExperimentAccess } from "@/src/features/experiments/hooks/useExperimentAccess";
 import {
   EvaluatorForm,
   useEvaluatorFormTemplate,
@@ -33,7 +33,6 @@ import {
 import useLocalStorage from "@/src/components/useLocalStorage";
 import { getDatasetBreadcrumb } from "@/src/features/datasets/utils/getDatasetBreadcrumb";
 import { ExperimentsTable } from "@/src/features/experiments/components/table";
-import { singleRunToExperimentsUrl } from "@/src/features/experiments/utils/experimentUrlTranslation";
 import { Skeleton } from "@/src/components/ui/skeleton";
 import {
   RouteParamsPendingFallback,

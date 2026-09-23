@@ -7,12 +7,12 @@ import { useHasProjectAccess } from "@/src/features/rbac";
 import { Download, UploadIcon, PlusIcon } from "lucide-react";
 import { api } from "@/src/utils/api";
 import { PromptsOnboarding } from "@/src/components/onboarding/PromptsOnboarding";
-import { useEntitlementLimit } from "@/src/features/entitlements/hooks";
+import { useEntitlementLimit } from "@/src/features/entitlements";
 import { PromptDetail } from "@/src/features/prompts/components/prompt-detail";
 import PromptMetrics from "@/src/features/prompts/PromptMetricsPage";
 import { useQueryParams, StringParam } from "use-query-params";
 import { useState } from "react";
-import { AutomationButton } from "@/src/features/automations/components/AutomationButton";
+import { AutomationButton } from "@/src/features/automations";
 import { ImportPromptsButtonDialogController } from "@/src/features/prompts/components/ImportPromptsButtonDialogController";
 import { Button } from "@/src/components/ui/button";
 import {
