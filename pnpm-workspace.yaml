@@ -169,7 +169,7 @@ overrides:
   # nodemailer imports (we pass a custom sendVerificationRequest); without this
   # pnpm auto-installs a second, unused nodemailer@7 instance for web.
   # Remove once next-auth allows nodemailer ^10.
-  "next-auth>nodemailer": "^10.0.5"
+  "next-auth>nodemailer": "^10.0.9"
 patchedDependencies:
   # focusFirst crashes on null item refs (items unmounting while entry focus
   # runs), e.g. opening a row-actions dropdown while a table re-renders.
@@ -191,6 +191,27 @@ publicHoistPattern:
   - "*prisma*"
   - "@aws-sdk/client-s3"
 minimumReleaseAgeExclude:
+  # These toolchain releases pass the five-day window after 2026-09-27.
+  - next@16.3.6
+  - "@next/env@16.3.6"
+  - "@next/eslint-plugin-next@16.3.6"
+  - "@next/swc-darwin-arm64@16.3.6"
+  - "@next/swc-darwin-x64@16.3.6"
+  - "@next/swc-linux-arm64-gnu@16.3.6"
+  - "@next/swc-linux-arm64-musl@16.3.6"
+  - "@next/swc-linux-x64-gnu@16.3.6"
+  - "@next/swc-linux-x64-musl@16.3.6"
+  - "@next/swc-win32-arm64-msvc@16.3.6"
+  - "@next/swc-win32-x64-msvc@16.3.6"
+  - turbo@2.11.3
+  - eslint-config-turbo@2.11.3
+  - eslint-plugin-turbo@2.11.3
+  - "@turbo/darwin-64@2.11.3"
+  - "@turbo/darwin-arm64@2.11.3"
+  - "@turbo/linux-64@2.11.3"
+  - "@turbo/linux-arm64@2.11.3"
+  - "@turbo/windows-64@2.11.3"
+  - "@turbo/windows-arm64@2.11.3"
   # Case-sensitivity handling fix (CVE-2026-86472) on top of the host confusion
   # + output-escaping fixes (CVE-2026-84394, CVE-2026-84292).
   - fast-uri@3.1.8
