@@ -1,6 +1,6 @@
 services:
   langfuse-web:
-    image: dionrecai909td/langfuse:latest
+    image: jyotiradityaduarah404/langfuse:latest
     depends_on: &langfuse-depends-on
       postgres:
         condition: service_healthy
@@ -47,7 +47,7 @@ services:
       start_interval: 2s
 
   langfuse-worker:
-    image: dionrecai909td/langfuse-worker:latest
+    image: jyotiradityaduarah404/langfuse-worker:latest
     depends_on: *langfuse-depends-on
     ports:
       - "3030:3030"

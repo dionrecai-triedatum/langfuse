@@ -3,7 +3,7 @@ import { useSession } from "next-auth/react";
 import { useQueryProjectOrOrganization } from "@/src/features/projects/hooks";
 import { useIsCloudBillingAvailable } from "@/src/ee/features/billing/utils/isCloudBilling";
 import { env } from "@/src/env.mjs";
-import { hasOrganizationAccess } from "@/src/features/rbac";
+import { hasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
 
 export function usePaymentBanner() {
   const session = useSession();

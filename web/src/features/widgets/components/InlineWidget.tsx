@@ -1,4 +1,4 @@
-/* eslint-disable no-nested-ternary */
+/* eslint-disable no-nested-ternary, @repo/component-file-structure */
 /* eslint-disable @repo/no-style-props */
 import { useMemo, useState, useCallback, type ReactNode } from "react";
 import { type DashboardWidgetChartType } from "@langfuse/shared/src/db";
@@ -8,8 +8,12 @@ import {
   type ViewVersion,
   getResultUnit,
 } from "@langfuse/shared/query";
-import { useScheduledDashboardExecuteQuery } from "@/src/features/dashboard/hooks/useDashboardQueryScheduler";
+import { useScheduledDashboardExecuteQuery } from "@/src/features/dashboard/hooks/DashboardQuerySchedulerProvider";
 import { Chart } from "@/src/features/widgets/chart-library/Chart";
+import {
+  type FormatMetricOptions,
+  type LegendPosition,
+} from "@/src/features/widgets/chart-library/chart-props";
 import { ChartLoadingState } from "@/src/features/widgets/chart-library/ChartLoadingState";
 import {
   getChartLoadingProgress,
@@ -23,7 +27,7 @@ import {
   type WidgetChartConfig,
 } from "@/src/features/widgets/utils";
 import { isTimeSeriesChart } from "@/src/features/widgets/chart-library/utils";
-import { useReadPath } from "@/src/features/events";
+import { useReadPath } from "@/src/features/events/hooks/useReadPath";
 import { cn } from "@/src/utils/tailwind";
 
 // ============================================================================
@@ -39,8 +43,17 @@ interface WidgetDimensionConfig {
   field: string;
 }
 
-export interface WidgetContentProps {
-  projectId: string;
+/** A widget queries its project, or runs its query through `fetchQuery`. */
+type WidgetQuerySource =
+  | { projectId: string; fetchQuery?: never }
+  | {
+      projectId?: never;
+      fetchQuery: NonNullable<
+        Parameters<typeof useScheduledDashboardExecuteQuery>[1]["fetchQuery"]
+      >;
+    };
+
+export type WidgetContentProps = WidgetQuerySource & {
   query: QueryType;
   version: ViewVersion;
   chartType: DashboardWidgetChartType;
@@ -78,18 +91,23 @@ export interface WidgetContentProps {
    */
   entityDimensionLabelMap?: Record<string, string>;
   /**
+   * Optional presentation-only labels for the first dimension's values, e.g.
+   * names for ID breakdowns. Values without a label keep their raw value.
+   */
+  dimensionLabelMap?: ReadonlyMap<string, string>;
+  /**
    * Hide x-axis tick labels on a categorical (entity-name) axis; the full name
    * stays in the hover tooltip. Off by default. Opt in on entity-dimension
-   * charts (experiments) whose long names clutter the axis.
+   * charts whose long names clutter the axis.
    */
   hideXAxisLabels?: boolean;
   /**
-   * Colour each bar of a categorical (entity) axis and name it in a legend
-   * below the plot. Off by default; opt in on an entity-dimension bar chart
-   * whose axis labels are hidden (the experiments strip). See
+   * Colour each bar of a categorical (entity) axis. Off by default; opt in on
+   * entity-dimension bar charts such as the experiments strip. See
    * `prepareCategoryBars`.
    */
   colorBarsByCategory?: boolean;
+  legendPosition?: LegendPosition;
   /**
    * Measure bars from zero rather than from a fitted domain. Off by default;
    * see `ChartProps.zeroBaseline`.
@@ -100,7 +118,8 @@ export interface WidgetContentProps {
    * short for it. Pass a stable node (see `Chart`).
    */
   emptyState?: ReactNode;
-}
+  usdPrecision?: FormatMetricOptions["usdPrecision"];
+};
 
 // ============================================================================
 // Components
@@ -130,6 +149,7 @@ const getXAxisValue = (
  */
 export function WidgetContent({
   projectId,
+  fetchQuery,
   query,
   version,
   chartType,
@@ -145,10 +165,13 @@ export function WidgetContent({
   onSortChange,
   className,
   entityDimensionLabelMap,
+  dimensionLabelMap,
   hideXAxisLabels,
   colorBarsByCategory,
+  legendPosition,
   zeroBaseline,
   emptyState,
+  usdPrecision,
 }: WidgetContentProps) {
   // Transport-only: `version` is a prop here, so an unresolved session can
   // never change WHAT is queried — only whether it streams (SSE) or not.
@@ -162,11 +185,12 @@ export function WidgetContent({
   // Execute the query
   const queryResult = useScheduledDashboardExecuteQuery(
     {
-      projectId,
+      projectId: projectId ?? "",
       version,
       query,
     },
     {
+      fetchQuery,
       trpc: {
         context: {
           skipBatch: true,
@@ -274,7 +298,7 @@ export function WidgetContent({
         if (val === null || val === undefined || val === "") {
           seriesDimension = "n/a";
         } else if (typeof val === "string") {
-          seriesDimension = val;
+          seriesDimension = dimensionLabelMap?.get(val) ?? val;
         } else if (Array.isArray(val)) {
           seriesDimension = val.join(", ");
         } else {
@@ -329,6 +353,7 @@ export function WidgetContent({
     metrics,
     dimensions,
     entityDimensionLabelMap,
+    dimensionLabelMap,
   ]);
 
   // Chart presentation (label and formatter)
@@ -342,8 +367,9 @@ export function WidgetContent({
       metric,
       view,
       version,
+      usdPrecision,
     });
-  }, [chartType, metrics, view, version]);
+  }, [chartType, metrics, view, version, usdPrecision]);
 
   // Loading state
   const chartLoadingState = getChartLoadingStateProps({
@@ -352,10 +378,12 @@ export function WidgetContent({
     errorMessage: queryResult.error,
   });
 
-  const usesBackendProgress = shouldUseWidgetSSE({
-    isV4Enabled: isV4,
-    version,
-  });
+  const usesBackendProgress =
+    !fetchQuery &&
+    shouldUseWidgetSSE({
+      isV4Enabled: isV4,
+      version,
+    });
 
   const loadingProgress = getChartLoadingProgress({
     isPending: queryResult.isPending,
@@ -427,19 +455,21 @@ export function WidgetContent({
         missingValue={getWidgetMissingBucketValue(metrics[0]?.agg ?? "count")}
         hideXAxisLabels={hideXAxisLabels}
         colorBarsByCategory={colorBarsByCategory}
+        legendPosition={legendPosition}
         zeroBaseline={zeroBaseline}
         emptyState={emptyState}
       />
-      <ChartLoadingState
-        isLoading={chartLoadingState.isLoading}
-        showSpinner={chartLoadingState.showSpinner}
-        showHintImmediately={chartLoadingState.showHintImmediately}
-        hintText={chartLoadingState.hintText}
-        onRetry={queryResult.isError ? handleRetry : undefined}
-        progress={loadingProgress}
-        layout={layoutHint}
-        className="bg-background/80 absolute inset-0 z-20 backdrop-blur-xs"
-      />
+      {chartLoadingState.isLoading && (
+        <ChartLoadingState
+          showSpinner={chartLoadingState.showSpinner}
+          showHintImmediately={chartLoadingState.showHintImmediately}
+          hintText={chartLoadingState.hintText}
+          onRetry={queryResult.isError ? handleRetry : undefined}
+          progress={loadingProgress}
+          layout={layoutHint}
+          className="bg-background/80 absolute inset-0 z-20 backdrop-blur-xs"
+        />
+      )}
     </div>
   );
 }

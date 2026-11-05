@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-use-before-define */
 const mocks = vi.hoisted(() => ({
   applyCommentFilters: vi.fn(),
   getObservationsCountFromEventsTable: vi.fn(),
@@ -36,6 +37,7 @@ import {
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import { addToDatasetRouter } from "@/src/features/batch-actions/server/addToDatasetRouter";
 import { runEvaluationRouter } from "@/src/features/batch-actions/server/runEvaluationRouter";
+import { batchActionRouter } from "@/src/features/batch-actions/server/batchActionRouter";
 import { env } from "@/src/env.mjs";
 
 const mutableEnv = env as unknown as {
@@ -95,6 +97,14 @@ function prepare({
   v4BetaEnabled = false,
   foundEvaluatorIds = [evaluatorId],
   missingPromptVariable = false,
+  decisionModel = false,
+  plan,
+}: {
+  v4BetaEnabled?: boolean;
+  foundEvaluatorIds?: string[];
+  missingPromptVariable?: boolean;
+  decisionModel?: boolean;
+  plan?: string;
 } = {}) {
   const batchActionCreate = vi
     .fn()
@@ -112,29 +122,42 @@ function prepare({
         if (args?.select?.id) {
           return foundEvaluatorIds.map((id) => ({ id }));
         }
+        const llmPrompt = missingPromptVariable
+          ? "Evaluate {{output}} {{input}}"
+          : "Evaluate {{output}}";
         return foundEvaluatorIds.map((id) => ({
           id,
           name: "Quality",
-          type: "LLM_AS_JUDGE",
+          type: decisionModel ? "DECISION_MODEL" : "LLM_AS_JUDGE",
           versions: [
             {
-              prompt: missingPromptVariable
-                ? "Evaluate {{output}} {{input}}"
-                : "Evaluate {{output}}",
-              promptMessages: [
-                {
-                  role: "user",
-                  content: missingPromptVariable
-                    ? "Evaluate {{output}} {{input}}"
-                    : "Evaluate {{output}}",
-                },
-              ],
-              variableMapping: [
-                {
-                  templateVariable: "output",
-                  selectedColumnId: "output",
-                },
-              ],
+              prompt: decisionModel ? null : llmPrompt,
+              promptMessages: decisionModel
+                ? null
+                : [
+                    {
+                      role: "user",
+                      content: llmPrompt,
+                    },
+                  ],
+              vars: decisionModel ? ["input", "output"] : ["output"],
+              variableMapping: decisionModel
+                ? [
+                    {
+                      templateVariable: "input",
+                      selectedColumnId: "input",
+                    },
+                    {
+                      templateVariable: "output",
+                      selectedColumnId: "output",
+                    },
+                  ]
+                : [
+                    {
+                      templateVariable: "output",
+                      selectedColumnId: "output",
+                    },
+                  ],
             },
           ],
         }));
@@ -145,7 +168,14 @@ function prepare({
     ...createInnerTRPCContext({
       session: {
         ...session,
-        user: { ...session.user, v4BetaEnabled },
+        user: {
+          ...session.user,
+          v4BetaEnabled,
+          organizations: session.user!.organizations.map((org) => ({
+            ...org,
+            plan,
+          })),
+        },
       } as Session,
       headers: {},
     }),
@@ -297,6 +327,7 @@ describe("batched evaluation version selection", () => {
       where: {
         id: { in: [evaluatorId] },
         projectId,
+        type: { not: "FACET" },
         assignments: {
           none: {
             evaluationRule: {
@@ -340,6 +371,33 @@ describe("batched evaluation version selection", () => {
         }),
       }),
       expect.anything(),
+    );
+  });
+
+  it("limits the selection to the organization plan's data-access window", async () => {
+    const context = prepare({ plan: "cloud:hobby" });
+
+    await context.runEvaluation.create({
+      projectId,
+      query,
+      evaluatorIds: [evaluatorId],
+      sourceTable: BatchEvalSourceTable.EVENTS,
+    });
+
+    const accessFloorFilter = expect.objectContaining({
+      type: "datetime",
+      column: "startTime",
+      operator: ">=",
+      value: expect.any(Date),
+    });
+    expect(context.batchActionCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          query: expect.objectContaining({
+            filter: [rawCommentFilter, accessFloorFilter],
+          }),
+        }),
+      }),
     );
   });
 
@@ -438,6 +496,39 @@ describe("batched evaluation version selection", () => {
     );
   });
 
+  it("queues decision-model mappings using evaluator state variables", async () => {
+    const context = prepare({
+      v4BetaEnabled: true,
+      decisionModel: true,
+    });
+    const evaluatorMappings = [
+      {
+        evaluatorId,
+        variableMapping: [
+          { templateVariable: "input", selectedColumnId: "input" },
+          { templateVariable: "output", selectedColumnId: "output" },
+        ],
+      },
+    ];
+
+    await context.runEvaluation.create({
+      projectId,
+      query,
+      evaluatorIds: [evaluatorId],
+      sourceTable: BatchEvalSourceTable.EVENTS,
+      evalVersion: "v2",
+      evaluatorMappings,
+    });
+
+    expect(mocks.queueAdd).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        payload: expect.objectContaining({ evaluatorMappings }),
+      }),
+      expect.anything(),
+    );
+  });
+
   it("rejects mapping overrides without evaluator v2", async () => {
     const context = prepare({ v4BetaEnabled: true });
 
@@ -525,5 +616,69 @@ describe("batched evaluation version selection", () => {
     });
 
     expect(context.batchActionCreate).not.toHaveBeenCalled();
+  });
+
+  it("validates inherited mappings when no override is sent", async () => {
+    const context = prepare({
+      v4BetaEnabled: true,
+      missingPromptVariable: true,
+    });
+
+    await expect(
+      context.runEvaluation.create({
+        projectId,
+        query,
+        evaluatorIds: [evaluatorId],
+        sourceTable: BatchEvalSourceTable.EVENTS,
+        evalVersion: "v2",
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining('Evaluator "Quality"'),
+    });
+
+    expect(context.batchActionCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("batch action history", () => {
+  it("keeps Topics processing records behind the Topics API", async () => {
+    const row = {
+      id: "evaluation",
+      projectId,
+      userId: "user-id",
+      actionType: "observation-run-batched-evaluation",
+    };
+    const batchAction = {
+      findMany: vi.fn().mockResolvedValue([row]),
+      count: vi.fn().mockResolvedValue(1),
+      findUnique: vi.fn().mockResolvedValueOnce(null).mockResolvedValue(row),
+    };
+    const caller = batchActionRouter.createCaller({
+      ...createInnerTRPCContext({ session, headers: {} }),
+      prisma: {
+        batchAction,
+        user: { findMany: vi.fn(async () => []) },
+      } as unknown as PrismaClient,
+    });
+
+    const history = await caller.all({ projectId, limit: 10, page: 0 });
+    expect(history.batchActions.map((row) => row.id)).toEqual(["evaluation"]);
+    expect(history.totalCount).toBe(1);
+    const where = { projectId, actionType: { not: "topics" } };
+    for (const query of [batchAction.findMany, batchAction.count])
+      expect(query).toHaveBeenCalledWith(expect.objectContaining({ where }));
+    await expect(
+      caller.byId({ projectId, batchActionId: "topics" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(batchAction.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { ...where, id: "topics" } }),
+    );
+    await expect(
+      caller.byId({ projectId, batchActionId: "evaluation" }),
+    ).resolves.toMatchObject({ id: "evaluation" });
+    expect(batchAction.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { ...where, id: "evaluation" } }),
+    );
   });
 });

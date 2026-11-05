@@ -27,10 +27,7 @@
 import { type NextApiRequest, type NextApiResponse } from "next";
 import { createMcpServer } from "@/src/features/mcp/server/mcpServer";
 import { handleMcpRequest } from "@/src/features/mcp/server/transport";
-import {
-  applyMcpCorsHeaders,
-  validateMcpRequestSecurity,
-} from "@/src/features/mcp/server/security";
+import { validateMcpRequestSecurity } from "@/src/features/mcp/server/security";
 import { formatErrorForUser } from "@/src/features/mcp/core/error-formatting";
 import { type ServerContext } from "@/src/features/mcp/types";
 import { addUserToSpan, logger } from "@langfuse/shared/src/server";
@@ -69,8 +66,7 @@ export default async function handler(
   res: NextApiResponse,
 ) {
   try {
-    const allowedOrigin = validateMcpRequestSecurity(req);
-    applyMcpCorsHeaders(res, allowedOrigin);
+    validateMcpRequestSecurity(req, res);
 
     // Handle preflight OPTIONS request after request validation
     if (req.method === "OPTIONS") {
@@ -137,6 +133,7 @@ export default async function handler(
       publicKey: scope.publicKey,
       plan: scope.plan,
       rateLimitOverrides: scope.rateLimitOverrides,
+      accessAuditLogEnabled: scope.accessAuditLogEnabled,
       userAgent: req.headers["user-agent"],
       inAppAgent: getInAppAgentContext(req, scope.isInAppAgentKey),
       auth: ctx,

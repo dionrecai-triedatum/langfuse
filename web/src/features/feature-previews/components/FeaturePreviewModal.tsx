@@ -1,4 +1,4 @@
-/* eslint-disable no-nested-ternary */
+/* eslint-disable @typescript-eslint/no-deprecated -- Legacy UI usage retained during migration to design-system components. */
 import Image from "next/image";
 import { useState } from "react";
 
@@ -15,17 +15,15 @@ import { Button } from "@/src/components/ui/button";
 import { cn } from "@/src/utils/tailwind";
 import {
   featurePreviewLabels,
-  type FeaturePreviewFlag,
+  type PersonalFeaturePreviewFlag,
 } from "@/src/features/feature-flags/available-flags";
 
 import modernSessionDarkIllustration from "../assets/modern-session-dark.svg";
 import modernSessionLightIllustration from "../assets/modern-session-light.svg";
-import improvedMessageRenderingDarkIllustration from "../assets/improved-message-rendering-dark.svg";
-import improvedMessageRenderingLightIllustration from "../assets/improved-message-rendering-light.svg";
 
 /** Flags the Feature Preview modal can toggle. Keep in sync with the
  *  userAccount.setFeaturePreviewEnabled allowlist and available-flags.ts. */
-export type PreviewFlag = FeaturePreviewFlag;
+export type PreviewFlag = PersonalFeaturePreviewFlag;
 
 type PreviewIllustration = {
   light: React.ComponentProps<typeof Image>["src"];
@@ -40,7 +38,7 @@ type PreviewRegistryItem = {
   description: string;
   details: string;
   feedbackUrl: string;
-  illustration: PreviewIllustration;
+  illustration?: PreviewIllustration;
 };
 
 /** Per-preview dynamic state, supplied by ControlledFeaturePreviewModal (which
@@ -53,33 +51,28 @@ export type PreviewState = {
   isToggling?: boolean;
 };
 
-// Static registry — one entry per preview. Order = sidebar order; each
-// preview ships separate light/dark illustrations.
+// Static registry — one entry per preview, in sidebar order.
+// Previews may include separate light/dark illustrations.
 const PREVIEW_REGISTRY: PreviewRegistryItem[] = [
   {
-    flag: "modernSession",
+    flag: "langfuseTopics",
+    description:
+      "Discover common topics across traces, with summaries and an interactive topic map.",
+    details:
+      "Choose traces and facets, run the topic pipeline, and explore the resulting clusters and trace summaries.",
+    feedbackUrl: "https://github.com/orgs/langfuse/discussions",
+  },
+  {
+    flag: "sessionViewV2",
     description:
       "Navigate every trace in a session from one continuous conversation feed, with tools and structured data available on demand.",
     details:
-      "Compact Session View replaces separate trace cards with a compact minimap and a virtualized feed. Jump between traces, keep the active trace in view, or temporarily show inline tool calls and system prompts.",
-    feedbackUrl: "https://github.com/orgs/langfuse/discussions",
+      "Redesigned Session View replaces separate trace cards with a compact minimap and a virtualized feed. Jump between traces, keep the active trace in view, or temporarily show inline tool calls and system prompts.",
+    feedbackUrl: "https://github.com/orgs/langfuse/discussions/18687",
     illustration: {
       light: modernSessionLightIllustration,
       dark: modernSessionDarkIllustration,
-      alt: "Compact Session View showing a trace minimap beside a continuous session conversation feed.",
-    },
-  },
-  {
-    flag: "normalizedIoPreview",
-    description:
-      "Render the Formatted view of trace and observation input/output more faithfully — chat messages, tool calls, and reasoning are recognized across a wide range of model providers and frameworks.",
-    details:
-      "A new parser understands the conventions of OpenAI, Anthropic, Gemini, LangChain, the Vercel AI SDK, OpenTelemetry GenAI, Pydantic AI, and more. Messages, tool calls, tool results, and reasoning render as structured blocks in the Formatted view instead of falling back to raw JSON. When enabled, the Formatted tab is powered by this parser everywhere trace and observation I/O is shown.",
-    feedbackUrl: "https://github.com/orgs/langfuse/discussions",
-    illustration: {
-      light: improvedMessageRenderingLightIllustration,
-      dark: improvedMessageRenderingDarkIllustration,
-      alt: "Formatted trace view rendering a user message, an assistant reply, a tool call, and a reasoning block as distinct structured cards.",
+      alt: "Redesigned Session View with a continuous session conversation feed.",
     },
   },
 ];
@@ -148,11 +141,7 @@ export function FeaturePreviewModal({
                         {featurePreviewLabels[item.flag]}
                       </span>
                       <span className="text-muted-foreground mt-1 line-clamp-2 block text-xs">
-                        {state[item.flag]?.disabled
-                          ? "Unavailable"
-                          : state[item.flag]?.enabled
-                            ? "Enabled"
-                            : "Available"}
+                        {getPreviewStatusLabel(state[item.flag])}
                       </span>
                     </span>
                   </button>
@@ -175,7 +164,7 @@ export function FeaturePreviewModal({
                     <h2 className="text-foreground text-xl font-bold">
                       {featurePreviewLabels[selected.flag]}
                     </h2>
-                    <p className="text-muted-foreground mt-2 max-w-2xl text-sm leading-5">
+                    <p className="text-muted-foreground mt-2 max-w-2xl text-sm">
                       {selected.description}
                     </p>
                     <Button asChild className="mt-4">
@@ -201,37 +190,40 @@ export function FeaturePreviewModal({
                   </div>
                 </div>
 
-                {selected.flag === "modernSession" && state.sessionTimeline ? (
+                {selected.flag === "sessionViewV2" &&
+                state.sessionViewV2Timeline ? (
                   <div className="border-border mt-5 flex items-start justify-between gap-6 border-t pt-5">
                     <div>
                       <h3 className="text-foreground text-sm font-bold">
-                        {featurePreviewLabels.sessionTimeline}
+                        {featurePreviewLabels.sessionViewV2Timeline}
                       </h3>
-                      <p className="text-muted-foreground mt-1 max-w-2xl text-sm leading-5">
+                      <p className="text-muted-foreground mt-1 max-w-2xl text-sm">
                         Use the redesigned timeline to navigate session events
                         in chronological order.
                       </p>
-                      {state.sessionTimeline.warningReason ? (
+                      {state.sessionViewV2Timeline.warningReason ? (
                         <p className="mt-2 text-xs text-yellow-800 dark:text-yellow-200">
-                          {state.sessionTimeline.warningReason}
+                          {state.sessionViewV2Timeline.warningReason}
                         </p>
                       ) : null}
                     </div>
                     <Switch
-                      checked={state.sessionTimeline.enabled}
+                      checked={state.sessionViewV2Timeline.enabled}
                       disabled={
-                        state.sessionTimeline.disabled === true ||
-                        state.sessionTimeline.isToggling === true
+                        state.sessionViewV2Timeline.disabled === true ||
+                        state.sessionViewV2Timeline.isToggling === true
                       }
-                      onCheckedChange={state.sessionTimeline.onToggle}
-                      aria-label={`Toggle ${featurePreviewLabels.sessionTimeline}`}
+                      onCheckedChange={state.sessionViewV2Timeline.onToggle}
+                      aria-label={`Toggle ${featurePreviewLabels.sessionViewV2Timeline}`}
                     />
                   </div>
                 ) : null}
 
-                <PreviewMockupPanel illustration={selected.illustration} />
+                {selected.illustration && (
+                  <PreviewMockupPanel illustration={selected.illustration} />
+                )}
 
-                <p className="text-muted-foreground mt-5 text-sm leading-5">
+                <p className="text-muted-foreground mt-5 text-sm">
                   {selected.details}
                 </p>
               </>
@@ -241,6 +233,12 @@ export function FeaturePreviewModal({
       </DialogContent>
     </Dialog>
   );
+}
+
+function getPreviewStatusLabel(state: PreviewState | undefined) {
+  if (state?.enabled) return "Enabled";
+  if (state?.disabled) return "Unavailable";
+  return "Available";
 }
 
 function PreviewMockupPanel({

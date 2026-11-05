@@ -1,4 +1,11 @@
+/* eslint-disable @typescript-eslint/no-use-before-define */
 import { type z, z as zodSchema } from "zod";
+import { TRPCError } from "@trpc/server";
+import { env } from "@/src/env.mjs";
+import {
+  getContextualFeatureFlags,
+  hasInternalAccess,
+} from "@/src/features/feature-flags/utils";
 import {
   createTRPCRouter,
   protectedProjectProcedure,
@@ -6,11 +13,16 @@ import {
   protectedGetSessionProcedure,
 } from "@/src/server/api/trpc";
 import {
+  isoDateTime,
   type OrderByState,
+  type SkillsAvailable,
+  type SkillsResourceLoaded,
   normalizeOrderByForTable,
   paginationZod,
   singleFilterList,
+  sessionTraceFilterSchema,
   timeFilter,
+  toAuditLogResourceRef,
 } from "@langfuse/shared";
 import {
   toDomainArrayWithStringifiedMetadata,
@@ -27,10 +39,12 @@ import {
   getEventBatchIO,
   EVENT_FILTER_OPTIONS_COLUMNS,
 } from "./eventsService";
+import { loadTraceTranscript } from "./loadTraceTranscript";
+import { recordTrpcAccess } from "@/src/ee/features/access-audit-log/server/recordAccessEvent";
 import {
   instrumentAsync,
+  getCurrentSpan,
   getScoresAndCorrectionsForTraces,
-  convertDateToClickhouseDateTime,
   getAgentGraphDataFromEventsTable,
   getObservationsForTraceFromEventsTable,
   MAX_OBSERVATIONS_PER_TRACE,
@@ -42,6 +56,7 @@ import {
   AgentGraphDataSchema,
   type AgentGraphDataResponse,
 } from "@/src/features/trace-graph-view/types";
+
 import type * as opentelemetry from "@opentelemetry/api";
 
 const GetAllEventsInput = EventsTableOptions.safeExtend({
@@ -68,6 +83,8 @@ export type EventBatchIOOutput = {
   input: string | null;
   output: string | null;
   metadata: MetadataDomainClient;
+  skillsAvailable?: SkillsAvailable;
+  skillsResourceLoaded?: SkillsResourceLoaded;
 };
 
 export type GetAllEventsInput = z.infer<typeof GetAllEventsInput>;
@@ -117,6 +134,7 @@ const BatchIOInput = zodSchema.object({
   // rendering anyway (IO_TABLE_CHAR_LIMIT).
   ioCharLimit: zodSchema.number().int().positive().max(10_000).optional(),
   includeToolCalls: zodSchema.boolean().optional(), // Defaults to false; tool-call arrays can be large
+  includeSkills: zodSchema.boolean().optional(),
   // Opts into trace-level auth (public traces) in protectedGetEventsTraceProcedure
   traceId: zodSchema.string().optional(),
 });
@@ -130,6 +148,15 @@ export const eventsRouter = createTRPCRouter({
   all: protectedProjectProcedure
     .input(GetAllEventsInput)
     .query(async ({ input, ctx }) => {
+      const normalizedOrderBy = normalizeOrderByForTable({
+        orderBy: input.orderBy,
+        expectedTimeColumn: "startTime",
+      });
+      const span = getCurrentSpan();
+      if (span) {
+        addAttributesToSpan({ span, input, orderBy: normalizedOrderBy });
+      }
+
       const { filterState, hasNoMatches } = await applyCommentFilters({
         filterState: input.filter ?? [],
         prisma: ctx.prisma,
@@ -146,10 +173,6 @@ export const eventsRouter = createTRPCRouter({
           name: "get-event-list-trpc",
         },
         async (span) => {
-          const normalizedOrderBy = normalizeOrderByForTable({
-            orderBy: input.orderBy,
-            expectedTimeColumn: "startTime",
-          });
           addAttributesToSpan({ span, input, orderBy: normalizedOrderBy });
 
           return getEventList({
@@ -343,6 +366,7 @@ export const eventsRouter = createTRPCRouter({
             truncated: input.truncated,
             ioCharLimit: input.ioCharLimit,
             includeToolCallFields: input.includeToolCalls,
+            includeSkillFields: input.includeSkills,
           });
 
           return batchIO.map(toDomainWithStringifiedMetadata);
@@ -368,6 +392,7 @@ export const eventsRouter = createTRPCRouter({
             truncated: input.truncated,
             ioCharLimit: input.ioCharLimit,
             includeToolCallFields: input.includeToolCalls,
+            includeSkillFields: input.includeSkills,
           });
 
           return batchIO.map(toDomainWithStringifiedMetadata);
@@ -392,6 +417,7 @@ export const eventsRouter = createTRPCRouter({
             ioCharLimit: input.ioCharLimit,
             includeExperimentFields: true,
             includeToolCallFields: input.includeToolCalls,
+            includeSkillFields: input.includeSkills,
           });
 
           return batchIO.map(toDomainWithStringifiedMetadata);
@@ -428,6 +454,72 @@ export const eventsRouter = createTRPCRouter({
       );
     }),
   /**
+   * Assemble the message transcript of a trace from its generations and tools,
+   * see `loadTraceTranscript`. Available to internal users and Session Timeline
+   * preview users, only where the events tables are written.
+   */
+  transcriptByTraceId: protectedGetEventsTraceProcedure
+    .input(
+      zodSchema.object({
+        projectId: zodSchema.string(),
+        traceId: zodSchema.string(),
+        timestamp: zodSchema.date().optional(),
+        fallbackToRootIO: zodSchema.boolean().default(false),
+        filter: sessionTraceFilterSchema.optional(),
+      }),
+    )
+    .query(async ({ input, ctx }) => {
+      const isSessionTimelineEnabled =
+        getContextualFeatureFlags(ctx.session?.user, {
+          projectId: input.projectId,
+        })?.sessionViewV2Timeline === true;
+      if (
+        !isSessionTimelineEnabled &&
+        !hasInternalAccess({
+          isAdmin: ctx.session?.user?.admin === true,
+          isExperimentalFeaturesEnabled:
+            env.LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES === "true",
+        })
+      ) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            "Transcripts require internal access or the Session Timeline preview.",
+        });
+      }
+      if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "legacy") {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Transcripts need the events-backed trace view.",
+        });
+      }
+      // The trace timestamp bounds the observation read; the trace is loaded
+      // by the procedure, so the input is only a fallback.
+      const timestamp = ctx.trace?.timestamp ?? input.timestamp;
+      if (!timestamp) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Trace timestamp is required.",
+        });
+      }
+
+      return instrumentAsync(
+        { name: "get-transcript-by-trace-id-trpc" },
+        async (span) => {
+          span.setAttribute("project_id", input.projectId);
+          span.setAttribute("trace_id", input.traceId);
+
+          return loadTraceTranscript({
+            projectId: input.projectId,
+            traceId: input.traceId,
+            timestamp,
+            fallbackToRootIO: input.fallbackToRootIO,
+            filter: input.filter,
+          });
+        },
+      );
+    }),
+  /**
    * Fetch all observations for a trace from the events table.
    * Returns up to MAX_OBSERVATIONS_PER_TRACE observations.
    * Sets cutoffObservationsAfterMaxCount=true if trace exceeds the cap.
@@ -456,6 +548,26 @@ export const eventsRouter = createTRPCRouter({
               timestamp: ctx.trace?.timestamp ?? input.timestamp,
             });
 
+          await recordTrpcAccess(ctx, input.projectId, {
+            route: "events.byTraceId",
+            resourceType: "trace",
+            resourceId: input.traceId,
+            action: "read",
+            resourceRefs: [toAuditLogResourceRef("trace", input.traceId)]
+              .concat(
+                ctx.trace?.sessionId
+                  ? [toAuditLogResourceRef("session", ctx.trace.sessionId)]
+                  : [],
+              )
+              .concat(
+                observations.map((o) =>
+                  toAuditLogResourceRef("observation", o.id),
+                ),
+              ),
+            params: input,
+            resultCount: observations.length,
+          });
+
           return {
             observations: toDomainArrayWithStringifiedMetadata(observations),
             cutoffObservationsAfterMaxCount:
@@ -477,8 +589,8 @@ export const eventsRouter = createTRPCRouter({
       zodSchema.object({
         projectId: zodSchema.string(),
         traceId: zodSchema.string(),
-        minStartTime: zodSchema.iso.datetime({ offset: true }),
-        maxStartTime: zodSchema.iso.datetime({ offset: true }),
+        minStartTime: isoDateTime({ offset: true }),
+        maxStartTime: isoDateTime({ offset: true }),
       }),
     )
     .query(async ({ input }): Promise<Required<AgentGraphDataResponse>[]> => {
@@ -490,18 +602,11 @@ export const eventsRouter = createTRPCRouter({
 
           const { traceId, minStartTime, maxStartTime } = input;
 
-          const chMinStartTime = convertDateToClickhouseDateTime(
-            new Date(minStartTime),
-          );
-          const chMaxStartTime = convertDateToClickhouseDateTime(
-            new Date(maxStartTime),
-          );
-
           const records = await getAgentGraphDataFromEventsTable({
             projectId: input.projectId,
             traceId,
-            chMinStartTime,
-            chMaxStartTime,
+            minStartTime: new Date(minStartTime),
+            maxStartTime: new Date(maxStartTime),
           });
 
           // Transform to AgentGraphDataResponse format

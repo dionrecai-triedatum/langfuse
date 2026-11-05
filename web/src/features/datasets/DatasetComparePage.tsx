@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- Legacy UI usage retained during migration to design-system components. */
 import { Button } from "@/src/components/ui/button";
 import { DatasetCompareRunsTable } from "@/src/features/datasets/components/DatasetCompareRunsTable";
-import { MultiSelectKeyValues } from "@/src/features/scores";
-import { FlaskConical, List } from "lucide-react";
+import { MultiSelectKeyValues } from "@/src/features/scores/components/MultiSelectKeyValues";
+import { FlaskConical, List } from "@langfuse/icons";
 import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
 import {
@@ -10,9 +11,11 @@ import {
   DialogTrigger,
 } from "@/src/components/ui/dialog";
 import { CreateExperimentsForm } from "@/src/features/experiments/components/CreateExperimentsForm";
-import { useHasProjectAccess } from "@/src/features/rbac";
-import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
-import Page from "@/src/components/layouts/page";
+import { useExperimentAccess } from "@/src/features/experiments/hooks/useExperimentAccess";
+import { toExperimentsResultsUrl } from "@/src/features/experiments/utils/experimentUrlTranslation";
+import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import Page from "@/src/components/layouts/Page";
 import {
   DATASET_RUN_COMPARE_TABS,
   getDatasetRunCompareTabs,
@@ -21,11 +24,9 @@ import { useDatasetRunsCompare } from "@/src/features/datasets/hooks/useDatasetR
 import {
   ActiveCellProvider,
   useActiveCell,
-} from "@/src/features/datasets/contexts/ActiveCellContext";
+} from "@/src/features/datasets/contexts/ActiveCellProvider";
 import { SidePanel, SidePanelContent } from "@/src/components/ui/side-panel";
 import { AnnotationPanel } from "@/src/features/datasets/components/AnnotationPanel";
-import { useExperimentAccess } from "@/src/features/experiments/hooks/useExperimentAccess";
-import { toExperimentsResultsUrl } from "@/src/features/experiments/utils/experimentUrlTranslation";
 import { Spinner } from "@/src/components/design-system/Spinner/Spinner";
 
 function DatasetCompareLegacy() {
@@ -36,7 +37,6 @@ function DatasetCompareLegacy() {
 
   const [isCreateExperimentDialogOpen, setIsCreateExperimentDialogOpen] =
     useState(false);
-  const [isAnnotationPanelOpen, setIsAnnotationPanelOpen] = useState(false);
 
   const hasExperimentWriteAccess = useHasProjectAccess({
     projectId,
@@ -53,7 +53,7 @@ function DatasetCompareLegacy() {
     setLocalRuns,
   } = useDatasetRunsCompare(projectId, datasetId);
 
-  const { activeCell, clearActiveCell } = useActiveCell();
+  const { activeCell, clearActiveCell, closeRunAnnotation } = useActiveCell();
 
   const handleExperimentSettled = async (data?: {
     success: boolean;
@@ -65,31 +65,11 @@ function DatasetCompareLegacy() {
     await handleExperimentSettledBase(data);
   };
 
-  // Clear annotation state on URL change (filters, navigation, etc.)
-  useEffect(() => {
-    clearActiveCell();
-  }, [router.query, clearActiveCell]);
-
-  // Open panel when cell becomes active, close when cleared
-  useEffect(() => {
-    setIsAnnotationPanelOpen(!!activeCell);
-  }, [activeCell]);
-
-  // Clear active cell when panel manually closed
   const handlePanelOpenChange = (open: boolean) => {
     if (!open) {
       clearActiveCell();
     }
-    setIsAnnotationPanelOpen(open);
   };
-
-  if (!runsData.data || runs.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <Spinner size="xl" variant="muted" />
-      </div>
-    );
-  }
 
   return (
     <Page
@@ -129,7 +109,7 @@ function DatasetCompareLegacy() {
                   disabled={!hasExperimentWriteAccess}
                   onClick={() => capture("dataset_run:new_form_open")}
                 >
-                  <FlaskConical className="h-4 w-4" />
+                  <FlaskConical size="base" color="default" />
                   <span className="ml-2 hidden md:block">New experiment</span>
                 </Button>
               </DialogTrigger>
@@ -154,7 +134,9 @@ function DatasetCompareLegacy() {
               className="w-fit"
               variant="outline"
               hideClearButton
-              iconLeft={<List className="mr-2 h-4 w-4" />}
+              iconLeft={
+                <List size="base" color="default" __rawClassName="mr-2" />
+              }
               options={runs.map((run) => ({
                 key: run.key,
                 value: run.value,
@@ -171,6 +153,7 @@ function DatasetCompareLegacy() {
                     });
                     setLocalRuns([]);
                   } else {
+                    if (!closeRunAnnotation(changedValueId)) return;
                     capture("dataset_run:compare_run_removed");
                     const newRunIds =
                       runIds?.filter((id) => id !== changedValueId) ?? [];
@@ -199,17 +182,23 @@ function DatasetCompareLegacy() {
     >
       <div className="grid flex-1 grid-cols-[1fr_auto] overflow-hidden">
         <div className="flex h-full flex-col overflow-hidden">
-          <DatasetCompareRunsTable
-            key={runIds?.join(",") ?? "empty"}
-            projectId={projectId}
-            datasetId={datasetId}
-            runIds={runIds ?? []}
-          />
+          {!runsData.data || runs.length === 0 ? (
+            <div className="flex h-full items-center justify-center">
+              <Spinner size="xl" variant="muted" />
+            </div>
+          ) : (
+            <DatasetCompareRunsTable
+              key={runIds?.join(",") ?? "empty"}
+              projectId={projectId}
+              datasetId={datasetId}
+              runIds={runIds ?? []}
+            />
+          )}
         </div>
         <SidePanel
           id="annotation-panel"
           openState={{
-            open: isAnnotationPanelOpen,
+            open: activeCell !== null,
             onOpenChange: handlePanelOpenChange,
           }}
           mobileTitle="Annotate"
@@ -260,7 +249,9 @@ export default function DatasetComparePage() {
   }
 
   return (
-    <ActiveCellProvider>
+    <ActiveCellProvider
+      key={JSON.stringify([projectId, router.query.datasetId])}
+    >
       <DatasetCompareLegacy />
     </ActiveCellProvider>
   );

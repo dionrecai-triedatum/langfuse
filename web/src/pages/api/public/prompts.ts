@@ -2,10 +2,8 @@ import { z } from "zod";
 
 import { getPromptByName } from "@/src/features/prompts/server/actions/getPromptByName";
 import { createPromptForApi } from "@/src/features/prompts/server/prompt-api-service";
-import {
-  createAuthedProjectAPIRoute,
-  withMiddlewares,
-} from "@/src/features/public-api/server";
+import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
+import { withMiddlewares } from "@/src/features/public-api/server/withMiddlewares";
 import { telemetry } from "@/src/features/telemetry";
 import {
   GetPromptSchema,

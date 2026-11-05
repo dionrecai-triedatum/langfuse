@@ -7,7 +7,6 @@ import {
 } from "@langfuse/shared";
 import { defineTool } from "../../../core/define-tool";
 import { observationEventsFilterConfig } from "@/src/features/events/config/filter-config";
-
 const EmptyInputSchema = z.object({});
 
 const OBSERVATION_MCP_FILTER_COLUMNS = eventsTableCols

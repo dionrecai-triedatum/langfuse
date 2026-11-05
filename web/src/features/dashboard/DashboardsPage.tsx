@@ -1,9 +1,9 @@
 import { useRouter } from "next/router";
-import Page from "@/src/components/layouts/page";
+import Page from "@/src/components/layouts/Page";
 import { ConnectedDashboardTable } from "@/src/features/dashboard/components/DashboardTable/ConnectedDashboardTable";
 import { ActionButton } from "@/src/components/ActionButton";
-import { PlusIcon } from "lucide-react";
-import { useHasProjectAccess } from "@/src/features/rbac";
+import { PlusIcon } from "@langfuse/icons";
+import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import {
   getDashboardTabs,
   DASHBOARD_TABS,
@@ -31,7 +31,7 @@ export default function DashboardsPage() {
         },
         actionButtonsRight: (
           <ActionButton
-            icon={<PlusIcon className="h-4 w-4" aria-hidden="true" />}
+            icon={<PlusIcon size="base" color="default" aria-hidden="true" />}
             hasAccess={hasCUDAccess}
             href={`/project/${projectId}/dashboards/new`}
             trackingEventName="dashboard:new_dashboard_form_open"

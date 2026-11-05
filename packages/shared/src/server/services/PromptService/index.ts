@@ -1,10 +1,9 @@
-/* eslint-disable @repo/no-exotic-operators */
 import { Redis, Cluster } from "ioredis";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { env } from "../../../env";
 import { logger } from "../../logger";
 import { escapeRegex } from "./utils";
-import { LangfuseConflictError } from "../../../errors";
+import { LangfuseConflictError } from "../../../errors/ConflictError";
 import { type Prisma, type PrismaClient, type Prompt } from "../../../db";
 import {
   PromptGraph,
@@ -18,6 +17,9 @@ import {
 import { ParsedPromptDependencyTag } from "../../../features/prompts/parsePromptDependencyTags";
 
 export const MAX_PROMPT_NESTING_DEPTH = 5;
+// Measured on the JSON-serialized prompt. A dependency tag repeated N times
+// expands to N copies of the child, so this bounds the resolved output.
+export const MAX_RESOLVED_PROMPT_LENGTH = 5_000_000;
 type PrismaClientOrTransaction = PrismaClient | Prisma.TransactionClient;
 
 export class PromptService {
@@ -52,8 +54,19 @@ export class PromptService {
       return this.getRawPrompt(params);
     }
 
+    let cacheKey: string | null = null;
     if (this.cacheEnabled) {
-      const cachedPrompt = await this.getCachedPrompt(params);
+      try {
+        // Capture the namespace before reading the DB so invalidation cannot
+        // move an in-flight result into the new epoch.
+        cacheKey = await this.getCacheKey(params);
+      } catch (e) {
+        this.logError("Error getting cached prompt", e);
+      }
+
+      const cachedPrompt = cacheKey
+        ? await this.getCachedPrompt(cacheKey)
+        : null;
 
       this.incrementMetric(
         cachedPrompt
@@ -70,8 +83,8 @@ export class PromptService {
 
     const dbPrompt = await this.getDbPrompt(params);
 
-    if (this.cacheEnabled && dbPrompt) {
-      await this.cachePrompt({ ...params, prompt: dbPrompt });
+    if (cacheKey && dbPrompt) {
+      await this.cachePrompt(cacheKey, dbPrompt);
 
       this.logDebug("Successfully cached prompt for params", params);
     }
@@ -147,13 +160,8 @@ export class PromptService {
     };
   }
 
-  private async getCachedPrompt(
-    params: PromptParams,
-  ): Promise<PromptResult | null> {
+  private async getCachedPrompt(key: string): Promise<PromptResult | null> {
     try {
-      const key = await this.getCacheKey(params);
-      if (!key) return null;
-
       const value = await this.redis?.get(key);
 
       if (value) return JSON.parse(value) as PromptResult;
@@ -164,12 +172,9 @@ export class PromptService {
     return null;
   }
 
-  private async cachePrompt(params: PromptParams & { prompt: PromptResult }) {
+  private async cachePrompt(key: string, prompt: PromptResult) {
     try {
-      const key = await this.getCacheKey(params);
-      if (!key) return;
-
-      const value = JSON.stringify(params.prompt);
+      const value = JSON.stringify(prompt);
 
       await this.redis?.set(key, value, "EX", this.ttlSeconds);
     } catch (e) {
@@ -190,6 +195,48 @@ export class PromptService {
       "EX",
       this.epochTtlSeconds,
     );
+  }
+
+  /**
+   * Counts prompt names matching a list filter, cached under the project's
+   * epoch so every prompt write (which rotates the epoch) invalidates it.
+   */
+  public async getPromptListCount(params: {
+    projectId: string;
+    filterKey: string;
+    computeCount: () => Promise<number>;
+  }): Promise<number> {
+    if (!this.cacheEnabled) return params.computeCount();
+
+    let key: string | null = null;
+    try {
+      // Read the epoch before counting: a write committing mid-count rotates
+      // the epoch afterwards, so a stale count can only land under a dead key.
+      const epoch = await this.getOrCreateEpoch(params);
+      if (epoch) {
+        const filterHash = createHash("sha256")
+          .update(params.filterKey)
+          .digest("base64url");
+        key = `prompt_list_count:${params.projectId}:${epoch}:${filterHash}`;
+
+        const cached = await this.redis?.get(key);
+        if (cached) return Number(cached);
+      }
+    } catch (e) {
+      this.logError("Error getting cached prompt list count", e);
+    }
+
+    const count = await params.computeCount();
+
+    if (key) {
+      try {
+        await this.redis?.set(key, String(count), "EX", this.ttlSeconds);
+      } catch (e) {
+        this.logError("Error caching prompt list count", e);
+      }
+    }
+
+    return count;
   }
 
   private async getCacheKey(params: PromptParams): Promise<string | null> {
@@ -349,7 +396,9 @@ export class PromptService {
               );
 
             // side-effect: populate adjacency list to return later as well
-            graph.dependencies[currentPrompt.id] ??= []; // initializes an empty list if it does not exist yet
+            if (graph.dependencies[currentPrompt.id] === undefined) {
+              graph.dependencies[currentPrompt.id] = [];
+            }
             graph.dependencies[currentPrompt.id].push({
               id: depPrompt.id,
               name: depPrompt.name,
@@ -376,6 +425,16 @@ export class PromptService {
             const replaceValue = JSON.stringify(resolvedDepPrompt)
               .slice(1, -1) // this is necessary to avoid parsing errors as resolved value is unstringified
               .replace(/\$/g, "$$$$"); // Escape dollar signs in replacement string. $ has special meaning in replace(), so we need to escape it with $$. Since we're in a string that will be used as a replacement, we need to double escape it (hence $$$$)
+
+            const occurrences = resolvedPrompt.match(regex)?.length ?? 0;
+            if (
+              resolvedPrompt.length + occurrences * replaceValue.length >
+              MAX_RESOLVED_PROMPT_LENGTH
+            ) {
+              throw new LangfuseConflictError(
+                `Resolved prompt exceeds maximum size (${MAX_RESOLVED_PROMPT_LENGTH} characters)`,
+              );
+            }
 
             resolvedPrompt = resolvedPrompt.replace(regex, replaceValue);
           }

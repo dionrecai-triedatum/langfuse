@@ -11,6 +11,8 @@ import {
   type PropsWithChildren,
 } from "react";
 import Head from "next/head";
+import { useInternalViewMode } from "@/src/features/feature-flags/hooks/useInternalViewMode";
+import { InternalViewModeDialog } from "@/src/features/feature-flags/components/InternalViewModeDialog";
 import { useRouter, type NextRouter } from "next/router";
 import {
   SidebarProvider,
@@ -18,24 +20,23 @@ import {
   useSidebar,
 } from "@/src/components/ui/sidebar";
 import { AppSidebar } from "@/src/components/nav/AppSidebar/AppSidebar";
-import { SidebarPresenceProvider } from "@/src/components/nav/sidebar-presence";
-import { Toaster } from "@/src/components/ui/sonner";
+import { SidebarPresenceProvider } from "@/src/components/nav/SidebarPresenceProvider";
+import { Toaster } from "@/src/components/ui/Toaster";
 import { Layer } from "@/src/components/design-system/Layer/Layer";
-import {
-  VersionUpdateBanner,
-  useVersionUpdatePrompt,
-} from "@/src/features/version-update";
+import { VersionUpdateBanner } from "@/src/features/version-update/VersionUpdateBanner";
+import { useVersionUpdatePrompt } from "@/src/features/version-update/useVersionUpdatePrompt";
 import { AppContentWithRightDrawer } from "../right-drawer/AppContentWithRightDrawer";
 import { ThemeToggle } from "@/src/features/theming/ThemeToggle";
 import {
   getAvailableCloudRegionOptions,
   getCloudRegionAuthUrl,
-  useLangfuseCloudRegion,
-} from "@/src/features/organizations";
+} from "@/src/features/organizations/cloudRegions";
+import { useLangfuseCloudRegion } from "@/src/features/organizations/hooks";
 import type { Session } from "next-auth";
 import type { NavigationItem } from "@/src/components/layouts/utilities/routes";
 import type { RouteGroup } from "@/src/components/layouts/routes";
 import dynamic from "next/dynamic";
+import { canOpenPersonalFeaturePreviews } from "@/src/features/feature-previews/canOpenPersonalFeaturePreviews";
 import { ControlledFeaturePreviewModal } from "@/src/features/feature-previews/components/ControlledFeaturePreviewModal";
 import { InAppAgentWindowHost } from "@/src/features/in-app-agent/components/InAppAgentWindowHost";
 import {
@@ -48,15 +49,20 @@ import { api } from "@/src/utils/api";
 import { usePlan } from "@/src/features/entitlements/hooks";
 import { env } from "@/src/env.mjs";
 import useLocalStorage from "@/src/components/useLocalStorage";
-import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { useSession } from "next-auth/react";
 import { useQueryProjectOrOrganization } from "@/src/features/projects/hooks";
-import { useHasOrganizationAccess } from "@/src/features/rbac";
+import { CustomerDataWarningBannerView } from "@/src/features/customer-data-warning/CustomerDataWarningBannerView";
+import { getCustomerDataWarning } from "@/src/features/customer-data-warning/getCustomerDataWarning";
+import { accountSettingsPath } from "@/src/features/settings/accountSettingsPath";
 import {
-  PaymentBannerView,
-  usePaymentBanner,
-} from "@/src/features/payment-banner";
-import { useTopBannerHeight } from "@/src/features/top-banner";
+  LegacyUiBanner,
+  useLegacyUiBannerVisible,
+} from "@/src/features/v4-migration/LegacyUiBanner";
+import { useHasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
+import { PaymentBannerView } from "@/src/features/payment-banner/PaymentBannerView";
+import { usePaymentBanner } from "@/src/features/payment-banner/PaymentBanner";
+import { useTopBannerHeight } from "@/src/features/top-banner/useTopBannerHeight";
 
 const DISMISSED_SIDEBAR_NOTIFICATIONS_KEY = "dismissed-sidebar-notifications";
 
@@ -72,9 +78,11 @@ const CommandMenu = dynamic(
 
 const PreviewDeploymentBanner = dynamic(
   () =>
-    import("@/src/features/preview-deployment-banner").then((mod) => ({
-      default: mod.PreviewDeploymentBanner,
-    })),
+    import("@/src/features/preview-deployment-banner/PreviewDeploymentBanner").then(
+      (mod) => ({
+        default: mod.PreviewDeploymentBanner,
+      }),
+    ),
   {
     ssr: false,
   },
@@ -121,6 +129,8 @@ export function AuthenticatedLayout({
 }: AuthenticatedLayoutProps) {
   const { isLangfuseCloud, region: currentRegion } = useLangfuseCloudRegion();
   const [featurePreviewOpen, setFeaturePreviewOpen] = useState(false);
+  const [internalViewModeOpen, setInternalViewModeOpen] = useState(false);
+  const internalViewMode = useInternalViewMode();
   const router = useRouter();
   useProjectCookie(router);
   const uiCustomization = useUiCustomization();
@@ -130,6 +140,26 @@ export function AuthenticatedLayout({
   // Account-level entry: use the raw flag (same as account settings tabs), not
   // project-scoped force-v3 suppression.
   const showV4Migration = useV4UpgradeUiFlag();
+  const { organization: currentOrganization, project: currentProject } =
+    useQueryProjectOrOrganization();
+  const routerProjectId =
+    typeof router.query.projectId === "string"
+      ? router.query.projectId
+      : undefined;
+  const showLegacyUiBanner = useLegacyUiBannerVisible(routerProjectId);
+  const customerDataWarning = getCustomerDataWarning({
+    email: user.email,
+    isAdmin: user.admin === true,
+    isLangfuseCloud,
+    projectId: routerProjectId ?? null,
+    organizationId:
+      typeof router.query.organizationId === "string"
+        ? router.query.organizationId
+        : null,
+    memberships: user.organizations,
+    organizationName: currentOrganization?.name ?? null,
+    projectName: currentProject?.name ?? null,
+  });
 
   const regionMenuItems = getAvailableCloudRegionOptions(currentRegion).map(
     (region) => ({
@@ -164,7 +194,11 @@ export function AuthenticatedLayout({
     },
   }));
 
-  const hasFeaturePreviews = isLangfuseCloud || user.v4BetaEnabled === true;
+  const hasFeaturePreviews = canOpenPersonalFeaturePreviews({
+    isLangfuseCloud,
+    v4BetaEnabled: user.v4BetaEnabled === true,
+    isAdmin: user.admin === true,
+  });
 
   // User navigation items for sidebar dropdown
   const sidebarUser = {
@@ -173,10 +207,19 @@ export function AuthenticatedLayout({
     avatar: user.image ?? "",
   };
   const userMenuItems = [
+    ...(internalViewMode.available
+      ? [
+          {
+            type: "action" as const,
+            name: "View mode",
+            onClick: () => setInternalViewModeOpen(true),
+          },
+        ]
+      : []),
     {
       type: "link" as const,
-      name: "Account Settings",
-      href: "/account/settings",
+      name: "Settings",
+      href: accountSettingsPath(currentOrganization?.id),
     },
     ...(showV4Migration
       ? [
@@ -270,6 +313,10 @@ export function AuthenticatedLayout({
               ref={topBannerRef}
               className="fixed top-0 z-51 flex w-full flex-col"
             >
+              {customerDataWarning && (
+                <CustomerDataWarningBannerView {...customerDataWarning} />
+              )}
+              {showLegacyUiBanner && <LegacyUiBanner />}
               {paymentBanner && (
                 <PaymentBannerView
                   organizationName={paymentBanner.organizationName}
@@ -296,11 +343,7 @@ export function AuthenticatedLayout({
                 user={sidebarUser}
                 userMenuItems={userMenuItems}
                 isLangfuseCloud={isLangfuseCloud}
-                routerProjectId={
-                  typeof router.query.projectId === "string"
-                    ? router.query.projectId
-                    : undefined
-                }
+                routerProjectId={routerProjectId}
               />
               {/* `min-w-0`, not a `100vw`-derived width: viewport units ignore
                     scrollbars, and a definite width also floors `min-width:
@@ -327,6 +370,12 @@ export function AuthenticatedLayout({
                 <InAppAgentWindowHost />
               </SidebarInset>
             </div>
+            {internalViewMode.available && (
+              <InternalViewModeDialog
+                open={internalViewModeOpen}
+                onOpenChange={setInternalViewModeOpen}
+              />
+            )}
             {hasFeaturePreviews ? (
               <ControlledFeaturePreviewModal
                 open={featurePreviewOpen}
@@ -389,7 +438,9 @@ function ConnectedAppSidebar({
   });
 
   const selfHostedPlan =
-    plan === "self-hosted:pro" || plan === "self-hosted:enterprise"
+    plan === "self-hosted:pro" ||
+    plan === "self-hosted:enterprise" ||
+    plan === "self-hosted:gov"
       ? plan
       : "oss";
 

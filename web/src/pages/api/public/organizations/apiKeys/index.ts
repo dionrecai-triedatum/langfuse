@@ -4,10 +4,8 @@ import { RateLimitService } from "@/src/features/public-api/server/RateLimitServ
 import { handleGetApiKeys } from "@/src/ee/features/admin-api/server/organizations/apiKeys";
 import { shadowAuth } from "@/src/features/public-api/server/shadowAuth";
 import { writeOrgError } from "@/src/features/public-api/server/writeError";
-
 import { type NextApiRequest, type NextApiResponse } from "next";
 import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
-
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse,
@@ -55,7 +53,7 @@ export default async function handler(
 
   // Route to the handler
   try {
-    return handleGetApiKeys(req, res, authCheck.scope.orgId);
+    return await handleGetApiKeys(req, res, authCheck.scope.orgId);
   } catch (error) {
     logger.error(
       `Error handling organization API keys for ${req.method}`,

@@ -2,7 +2,7 @@
  * TracePanelNavigation - Pure content component for navigation panel
  *
  * Responsibility:
- * - Decide which navigation view to show (Tree/Timeline/Search)
+ * - Decide which navigation view to show (Tree/Timeline/Graph/Search)
  * - The Timeline is either the classic gantt or the Compact Timeline, depending
  *   on that feature preview
  * - NO layout structure - just returns the content component
@@ -18,8 +18,8 @@
  */
 
 import { StringParam, useQueryParam } from "use-query-params";
-import { useSearch } from "@/src/features/traces/contexts/SearchContext";
-import { useTraceGraphData } from "@/src/features/traces/contexts/TraceGraphDataContext";
+import { useSearch } from "@/src/features/traces/contexts/SearchProvider";
+import { useTraceGraphData } from "@/src/features/traces/contexts/TraceGraphDataProvider";
 import { TraceTree } from "./TraceTree";
 import { TraceSearchList } from "./TraceSearchList";
 import { TraceTimelineCompact } from "./TraceTimelineDense/TraceTimelineCompact";

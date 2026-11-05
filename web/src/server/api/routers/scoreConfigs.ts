@@ -1,12 +1,13 @@
 import { z } from "zod";
 
-import { throwIfNoProjectAccess } from "@/src/features/rbac";
+import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import {
   createTRPCRouter,
   protectedProjectProcedure,
 } from "@/src/server/api/trpc";
 import {
   filterAndValidateDbScoreConfigList,
+  InternalServerError,
   InvalidRequestError,
   LangfuseNotFoundError,
   optionalPaginationZod,
@@ -266,9 +267,17 @@ export const scoreConfigsRouter = createTRPCRouter({
       });
 
       if (!config) {
-        throw new Error("No score config with this id in this project.");
+        throw new LangfuseNotFoundError(
+          "No score config with this id in this project.",
+        );
       }
 
-      return validateDbScoreConfig(config);
+      const parsedConfig = validateDbScoreConfigSafe(config);
+      if (!parsedConfig.success) {
+        traceException(parsedConfig.error);
+        throw new InternalServerError("Requested score config is corrupted");
+      }
+
+      return parsedConfig.data;
     }),
 });

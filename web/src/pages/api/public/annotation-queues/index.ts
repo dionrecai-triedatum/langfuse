@@ -10,7 +10,6 @@ import {
   createAnnotationQueueForApi,
   listAnnotationQueuesForApi,
 } from "@/src/features/annotation-queues/server/publicAnnotationQueueService";
-
 export default withMiddlewares({
   GET: createAuthedProjectAPIRoute({
     name: "Get annotation queues",

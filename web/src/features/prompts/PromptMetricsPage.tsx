@@ -1,6 +1,9 @@
-/* eslint-disable no-nested-ternary */
+/* eslint-disable no-nested-ternary, react/no-unstable-nested-components */
 import { DataTable } from "@/src/components/table/data-table";
-import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
+import {
+  customRowHeightMenu,
+  useRowHeightLocalStorage,
+} from "@/src/components/table/data-table-row-height-switch";
 import { DataTableToolbar } from "@/src/components/table/data-table-toolbar";
 import { type LangfuseColumnDef } from "@/src/components/table/types";
 import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
@@ -13,27 +16,28 @@ import { createNumberTableColumn } from "@/src/components/design-system/table/co
 import { createTextTableColumn } from "@/src/components/design-system/table/columns/createTextTableColumn";
 import { numberFormatter, usdFormatter } from "@/src/utils/numbers";
 import { formatIntervalSeconds } from "@/src/utils/dates";
-import useColumnVisibility from "@/src/features/column-visibility/hooks/useColumnVisibility";
+import { default as useColumnVisibility } from "@/src/features/column-visibility/hooks/useColumnVisibility";
+import { default as useColumnOrder } from "@/src/features/column-visibility/hooks/useColumnOrder";
 import { Skeleton } from "@/src/components/ui/skeleton";
 import { type ScoreAggregate } from "@langfuse/shared";
-import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
-import Page from "@/src/components/layouts/page";
-import { DetailPageNav } from "@/src/features/navigate-detail-pages";
-import { TruncatedLabels } from "@/src/components/TruncatedLabels";
+import Page from "@/src/components/layouts/Page";
+import { DetailPageNav } from "@/src/features/navigate-detail-pages/DetailPageNav";
+import { toPromptLabelListItems } from "@/src/features/prompts/utils";
+import { LabelList } from "@/src/components/design-system/LabelList/LabelList";
 import {
   getPromptTabs,
   PROMPT_TABS,
 } from "@/src/features/navigation/utils/prompt-tabs";
+import { useScoreColumns } from "@/src/features/scores/hooks/useScoreColumns";
 import {
-  useScoreColumns,
   scoreFilters,
   addPrefixToScoreKeys,
-} from "@/src/features/scores";
+} from "@/src/features/scores/lib/scoreColumns";
 import useProjectIdFromURL from "@/src/hooks/useProjectIdFromURL";
 import { useTableDateRange } from "@/src/hooks/useTableDateRange";
 import { toAbsoluteTimeRange } from "@/src/utils/date-range-utils";
 import { useMemo } from "react";
-import { TableHeaderControls } from "@/src/components/table/table-header-controls";
+import { TableHeaderControls } from "@/src/components/table/TableHeaderControls";
 
 export type PromptVersionTableRow = {
   version: number;
@@ -111,7 +115,7 @@ export default function PromptMetricsPage({
     column: "startTime",
     order: "DESC",
   });
-  const [rowHeight, setRowHeight] = useRowHeightLocalStorage(
+  const [rowHeight, setRowHeight, rowHeights] = useRowHeightLocalStorage(
     "promptVersion",
     "s",
   );
@@ -195,17 +199,15 @@ export default function PromptMetricsPage({
       id: "labels",
       header: "Labels",
       isPinnedLeft: true,
-      size: 160,
+      size: 240,
       cell: ({ row }) => {
         const values: string[] = row.getValue("labels");
         return (
           values &&
           values.length > 0 && (
-            <TruncatedLabels
-              labels={values}
-              maxVisibleLabels={3}
-              className="-mr-8 flex max-h-full flex-wrap gap-1"
-              showSimpleBadges={true}
+            <LabelList
+              labels={toPromptLabelListItems(values)}
+              shouldWrap={false}
             />
           )
         );
@@ -417,6 +419,7 @@ export default function PromptMetricsPage({
           setTimeRange={showControlsInPageHeader ? undefined : setTimeRange}
           rowHeight={rowHeight}
           setRowHeight={setRowHeight}
+          customRowHeight={customRowHeightMenu(rowHeights)}
           columnVisibility={columnVisibility}
           setColumnVisibility={setColumnVisibilityState}
           columnOrder={columnOrder}
@@ -453,6 +456,9 @@ export default function PromptMetricsPage({
         columnOrder={columnOrder}
         onColumnOrderChange={setColumnOrder}
         rowHeight={rowHeight}
+        customRowHeightPx={rowHeights.activeHeightPx}
+        onCustomRowHeightChange={rowHeights.setCustomPx}
+        onSelectRowHeight={setRowHeight}
       />
     </Page>
   );

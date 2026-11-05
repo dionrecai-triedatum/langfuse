@@ -7,10 +7,12 @@ import { type DashboardDateRangeAggregationOption } from "@/src/utils/date-range
 import {
   convertScoreColumnsToAnalyticsData,
   getScoreDataTypeIcon,
+} from "@/src/features/scores/lib/scoreColumns";
+import {
   isBooleanDataType,
   isCategoricalDataType,
   isNumericDataType,
-} from "@/src/features/scores";
+} from "@/src/features/scores/lib/helpers";
 import React, { useMemo } from "react";
 import { Separator } from "@/src/components/ui/separator";
 import { NumericScoreTimeSeriesChart } from "@/src/features/dashboard/components/score-analytics/NumericScoreTimeSeriesChart";
@@ -34,6 +36,10 @@ export function ScoreAnalytics(props: {
   schedulerId?: string;
   /** Shared hover-sync group so the per-score line charts join the dashboard crosshair. */
   syncId?: string;
+  sync?: {
+    activeKey: string | undefined;
+    onActiveKeyChange: (key: string | undefined) => void;
+  };
 }) {
   // Stale score selections in localStorage are ignored as we only show scores that exist in scoreAnalyticsOptions
   const [selectedDashboardScoreKeys, setSelectedDashboardScoreKeys] =
@@ -203,6 +209,7 @@ export function ScoreAnalytics(props: {
                         metricsVersion={props.metricsVersion}
                         schedulerId={props.schedulerId}
                         syncId={props.syncId}
+                        sync={props.sync}
                       />
                     )}
                   </div>

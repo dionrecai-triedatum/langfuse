@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import {
   convertScoreColumnsToAnalyticsData,
   scoreFilters,
-} from "@/src/features/scores";
+} from "@/src/features/scores/lib/scoreColumns";
 import { transformAggregatedRunMetricsToChartData } from "@/src/features/dashboard/lib/score-analytics-utils";
 
 export function useDatasetRunCompareChartData(

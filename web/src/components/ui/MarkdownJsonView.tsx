@@ -1,33 +1,25 @@
-/* eslint-disable no-nested-ternary */
-/* eslint-disable @repo/no-style-props */
+/* eslint-disable @repo/no-style-props, @repo/component-file-structure, @typescript-eslint/no-use-before-define */
 import {
+  OpenAIContentParts,
   OpenAIContentSchema,
   type OpenAIOutputAudioType,
 } from "@langfuse/shared";
 import { Button } from "@/src/components/ui/button";
 import { PrettyJsonView } from "@/src/components/ui/PrettyJsonView";
-import { MarkdownView } from "@/src/components/ui/MarkdownViewer";
+import { MarkdownView } from "@/src/components/ui/MarkdownView";
 import { type MediaReturnType } from "@/src/features/media/validation";
-import { Check, ChevronDown, Copy } from "lucide-react";
+import { Check, Copy } from "@langfuse/icons";
 import { useMemo, useState } from "react";
 import { type z } from "zod";
 import { useMarkdownRenderCharacterLimit } from "@/src/hooks/useMarkdownRenderCharacterLimit";
 import { cn } from "@/src/utils/tailwind";
+import { classifyMediaValue } from "@/src/components/ui/media/mediaUtils";
 
 type MarkdownJsonViewHeaderProps = {
   title: string | React.ReactNode;
   titleIcon?: React.ReactNode;
   handleOnCopy: (event?: React.MouseEvent<HTMLButtonElement>) => void;
   controlButtons?: React.ReactNode;
-  /** When set, the header hosts expand/collapse so a long body is not the
-      only place to find the control. `subject` names what collapses in the
-      accessible labels (defaults to "system prompt", its original use). */
-  collapseControl?: {
-    isCollapsed: boolean;
-    onToggle: () => void;
-    subject?: string;
-  };
-  inset?: boolean;
   /** Hosts that render their own copy control (e.g. inside the content box)
       suppress the header's. */
   hideCopyButton?: boolean;
@@ -41,64 +33,18 @@ export function MarkdownJsonViewHeader({
   titleIcon,
   handleOnCopy,
   controlButtons,
-  collapseControl,
-  inset = false,
   hideCopyButton = false,
   hoverRevealControls = false,
 }: MarkdownJsonViewHeaderProps) {
   const [isCopied, setIsCopied] = useState(false);
-  const collapseSubject = collapseControl?.subject ?? "system prompt";
-  const collapseLabel = collapseControl
-    ? collapseControl.isCollapsed
-      ? `Expand ${collapseSubject}`
-      : `Collapse ${collapseSubject}`
-    : undefined;
-  // Keep the visible title in the title-button name (WCAG 2.5.3). A generic
-  // aria-label would hide message `name`s from assistive tech.
-  const titleButtonLabel =
-    typeof title === "string" && collapseLabel
-      ? `${title}, ${collapseLabel}`
-      : collapseLabel;
-
-  const titleContent = (
-    <>
-      {collapseControl ? (
-        <ChevronDown
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 transition-transform",
-            collapseControl.isCollapsed && "-rotate-90",
-          )}
-          aria-hidden
-        />
-      ) : null}
-      {titleIcon}
-      {title}
-    </>
-  );
 
   return (
-    <div
-      className={cn(
-        "io-message-header flex flex-row items-center justify-between py-1 text-sm font-bold capitalize",
-        inset ? "px-2" : "px-1",
-      )}
-    >
+    <div className="io-message-header flex h-8 flex-row items-center justify-between px-1 text-sm font-bold capitalize">
       {/* Masked from session recordings: the title can be a customer-provided
           message `name` (or tool name) rather than a fixed role string. */}
       <div className="ph-no-capture flex items-center gap-2">
-        {collapseControl ? (
-          <button
-            type="button"
-            onClick={collapseControl.onToggle}
-            aria-expanded={!collapseControl.isCollapsed}
-            aria-label={titleButtonLabel}
-            className="hover:text-foreground/80 flex items-center gap-1.5"
-          >
-            {titleContent}
-          </button>
-        ) : (
-          titleContent
-        )}
+        {titleIcon}
+        {title}
       </div>
       <div
         className={cn(
@@ -109,18 +55,6 @@ export function MarkdownJsonViewHeader({
             "opacity-0 transition-opacity group-hover/iosection:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100",
         )}
       >
-        {collapseControl ? (
-          <Button
-            variant="ghost"
-            size="xs"
-            type="button"
-            onClick={collapseControl.onToggle}
-            aria-label={collapseLabel}
-            className="text-muted-foreground hover:bg-border w-fit text-xs"
-          >
-            {collapseControl.isCollapsed ? "Expand" : "Collapse"}
-          </Button>
-        ) : null}
         {controlButtons}
         {!hideCopyButton && (
           <Button
@@ -136,9 +70,9 @@ export function MarkdownJsonViewHeader({
             className="text-muted-foreground hover:text-foreground hover:bg-transparent"
           >
             {isCopied ? (
-              <Check className="h-3 w-3" />
+              <Check size="base" color="default" />
             ) : (
-              <Copy className="h-3 w-3" />
+              <Copy size="base" color="default" />
             )}
           </Button>
         )}
@@ -161,35 +95,46 @@ export const canRenderContentAsMarkdown = (
   content: unknown,
   characterLimit: number,
 ): content is z.input<typeof OpenAIContentSchema> =>
-  OpenAIContentSchema.safeParse(content).success &&
+  (OpenAIContentSchema.safeParse(content).success ||
+    isOpenAIContentWithExternalS3Image(content)) &&
   // Don't render if markdown content is huge
   JSON.stringify(content || {}).length <= characterLimit;
 
-// MarkdownJsonView renders markdown whenever the content is valid markdown
-// (see canRenderContentAsMarkdown), otherwise it falls back to JSON.
+const isOpenAIContentWithExternalS3Image = (content: unknown) => {
+  if (!Array.isArray(content)) return false;
+
+  let hasExternalS3Image = false;
+  const hasOnlyRenderableParts = content.every((part) => {
+    if (
+      typeof part === "object" &&
+      part !== null &&
+      part.type === "image_url" &&
+      typeof part.image_url === "object" &&
+      part.image_url !== null
+    ) {
+      const descriptor = classifyMediaValue(part.image_url.url);
+      if (descriptor?.kind === "s3") {
+        hasExternalS3Image = true;
+        return true;
+      }
+    }
+
+    return OpenAIContentParts.safeParse([part]).success;
+  });
+
+  return hasExternalS3Image && hasOnlyRenderableParts;
+};
+
 export function MarkdownJsonView({
   content,
-  title,
-  titleIcon,
   className,
   audio,
   media,
-  controlButtons,
-  afterHeader,
-  isSystemPrompt,
 }: {
   content?: unknown;
-  title?: string;
-  titleIcon?: React.ReactNode;
   className?: string;
   audio?: OpenAIOutputAudioType;
   media?: MediaReturnType[];
-  controlButtons?: React.ReactNode;
-  /** Content to render between header and main content (e.g., thinking blocks) */
-  afterHeader?: React.ReactNode;
-  /** Collapse long content to a preview (from raw `role === "system"`, since
-      the title can carry a message `name` instead of the role). */
-  isSystemPrompt?: boolean;
 }) {
   const characterLimit = useMarkdownRenderCharacterLimit();
   // Boxed so a renderable `null` content stays distinguishable from
@@ -202,32 +147,19 @@ export function MarkdownJsonView({
     [content, characterLimit],
   );
 
-  return (
-    <>
-      {markdownContent ? (
-        <MarkdownView
-          markdown={markdownContent.value}
-          title={title}
-          titleIcon={titleIcon}
-          audio={audio}
-          media={media}
-          controlButtons={controlButtons}
-          afterHeader={afterHeader}
-          isSystemPrompt={isSystemPrompt}
-        />
-      ) : (
-        <PrettyJsonView
-          json={content ?? (audio ? { audio } : null)}
-          title={title}
-          titleIcon={titleIcon}
-          className={className}
-          media={media}
-          currentView="pretty"
-          controlButtons={controlButtons}
-          afterHeader={afterHeader}
-          isSystemPrompt={isSystemPrompt}
-        />
-      )}
-    </>
+  return markdownContent ? (
+    <MarkdownView
+      markdown={markdownContent.value}
+      audio={audio}
+      media={media}
+    />
+  ) : (
+    <div className={className}>
+      <PrettyJsonView
+        json={content ?? (audio ? { audio } : null)}
+        media={media}
+        currentView="pretty"
+      />
+    </div>
   );
 }

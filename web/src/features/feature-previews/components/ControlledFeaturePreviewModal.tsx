@@ -1,10 +1,14 @@
 /* eslint-disable no-nested-ternary */
-import { showErrorToast, showSuccessToast } from "@/src/features/notifications";
+import { showErrorToast } from "@/src/features/notifications/showErrorToast";
+import { showSuccessToast } from "@/src/features/notifications/showSuccessToast";
 import { useSession } from "next-auth/react";
-import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
-import { useReadPath, V4_PREVIEW_LABEL } from "@/src/features/events";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import { useReadPath } from "@/src/features/events/hooks/useReadPath";
+import { V4_PREVIEW_LABEL } from "@/src/features/events/lib/v4PreviewLabel";
 import { featurePreviewLabels } from "@/src/features/feature-flags/available-flags";
+import { useInternalFeaturesEnabled } from "@/src/features/feature-flags/hooks/useInternalFeaturesEnabled";
 import { api } from "@/src/utils/api";
+import { classifyTrpcToastError } from "@/src/utils/trpcErrorClassification";
 
 import {
   FeaturePreviewModal,
@@ -22,6 +26,7 @@ export function ControlledFeaturePreviewModal({
   onOpenChange,
 }: ControlledFeaturePreviewModalProps) {
   const authSession = useSession();
+  const internalViewEnabled = useInternalFeaturesEnabled();
   const { isV4 } = useReadPath();
   const capture = usePostHogClientCapture();
   const setFeaturePreviewEnabled =
@@ -33,12 +38,17 @@ export function ControlledFeaturePreviewModal({
           isEnabled: variables.enabled,
         });
         showSuccessToast({
+          operation: "user_feature_preview.update",
           title: "Feature preview updated",
           description: `${featurePreviewLabels[variables.flag]} preview has been ${variables.enabled ? "enabled" : "disabled"}.`,
         });
       },
       onError: (error) => {
-        showErrorToast("Failed to update feature preview", error.message);
+        showErrorToast(
+          "Failed to update feature preview",
+          error.message,
+          classifyTrpcToastError(error, "user_feature_preview.update"),
+        );
       },
     });
 
@@ -46,52 +56,56 @@ export function ControlledFeaturePreviewModal({
     setFeaturePreviewEnabled.mutate({ flag, enabled });
 
   const isModernSessionEnabled =
-    authSession.data?.user?.featureFlags.modernSession === true ||
-    authSession.data?.environment.enableExperimentalFeatures === true;
+    isV4 &&
+    (authSession.data?.user?.featureFlags.sessionViewV2 === true ||
+      authSession.data?.environment.enableExperimentalFeatures === true);
 
   const state: Partial<Record<PreviewFlag, PreviewState>> = {
-    modernSession: {
+    ...(authSession.data?.user?.admin === true
+      ? {
+          langfuseTopics: {
+            enabled:
+              internalViewEnabled ||
+              authSession.data.user.featureFlags.langfuseTopics === true,
+            disabled: internalViewEnabled,
+            warningReason: internalViewEnabled
+              ? "Topics is enabled by Internal view. Switch to External view to manage this preview separately."
+              : undefined,
+            onToggle: onToggle("langfuseTopics"),
+            isToggling: setFeaturePreviewEnabled.isPending,
+          },
+        }
+      : {}),
+    sessionViewV2: {
       enabled: isModernSessionEnabled,
       disabled:
         !isV4 ||
         authSession.data?.environment.enableExperimentalFeatures === true,
       warningReason: !isV4
-        ? `Compact Session View is only available on the events-backed session view. Turn on ${V4_PREVIEW_LABEL} to enable it.`
+        ? `Redesigned Session View is only available on the events-backed session view. Turn on ${V4_PREVIEW_LABEL} to enable it.`
         : authSession.data?.environment.enableExperimentalFeatures === true
           ? "This preview is enabled by LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES, so a per-user opt-out does not disable it."
           : undefined,
-      onToggle: onToggle("modernSession"),
+      onToggle: onToggle("sessionViewV2"),
       isToggling: setFeaturePreviewEnabled.isPending,
     },
-    sessionTimeline: {
+    sessionViewV2Timeline: {
       enabled:
-        authSession.data?.user?.featureFlags.sessionTimeline === true ||
-        authSession.data?.environment.enableExperimentalFeatures === true,
+        isModernSessionEnabled &&
+        (authSession.data?.user?.featureFlags.sessionViewV2Timeline === true ||
+          authSession.data?.environment.enableExperimentalFeatures === true),
       disabled:
         !isV4 ||
         !isModernSessionEnabled ||
         authSession.data?.environment.enableExperimentalFeatures === true,
       warningReason: !isV4
-        ? `Compact Session View is only available on the events-backed session view. Turn on ${V4_PREVIEW_LABEL} to enable it.`
+        ? `Redesigned Session View is only available on the events-backed session view. Turn on ${V4_PREVIEW_LABEL} to enable it.`
         : !isModernSessionEnabled
-          ? "Enable Compact Session View before enabling the Session Timeline."
+          ? "Enable Redesigned Session View before enabling the Session Timeline."
           : authSession.data?.environment.enableExperimentalFeatures === true
             ? "This preview is enabled by LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES, so a per-user opt-out does not disable it."
             : undefined,
-      onToggle: onToggle("sessionTimeline"),
-      isToggling: setFeaturePreviewEnabled.isPending,
-    },
-    normalizedIoPreview: {
-      enabled:
-        authSession.data?.user?.featureFlags.normalizedIoPreview === true ||
-        authSession.data?.environment.enableExperimentalFeatures === true,
-      disabled:
-        authSession.data?.environment.enableExperimentalFeatures === true,
-      warningReason:
-        authSession.data?.environment.enableExperimentalFeatures === true
-          ? "This preview is enabled by LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES, so a per-user opt-out does not disable it."
-          : undefined,
-      onToggle: onToggle("normalizedIoPreview"),
+      onToggle: onToggle("sessionViewV2Timeline"),
       isToggling: setFeaturePreviewEnabled.isPending,
     },
   };

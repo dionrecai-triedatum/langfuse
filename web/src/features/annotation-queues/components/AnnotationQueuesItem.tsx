@@ -1,8 +1,8 @@
 import { SupportOrUpgradePage } from "@/src/ee/features/billing/components/SupportOrUpgradePage";
-import { useHasProjectAccess } from "@/src/features/rbac";
+import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { AnnotationQueueItemPage } from "@/src/features/annotation-queues/components/AnnotationQueueItemPage";
 import { api } from "@/src/utils/api";
-import Page from "@/src/components/layouts/page";
+import Page from "@/src/components/layouts/Page";
 
 export const AnnotationQueuesItem = ({
   annotationQueueId,
@@ -56,6 +56,7 @@ export const AnnotationQueuesItem = ({
       }}
     >
       <AnnotationQueueItemPage
+        key={JSON.stringify([projectId, annotationQueueId])}
         projectId={projectId}
         annotationQueueId={annotationQueueId}
         queryItemId={itemId}

@@ -1,9 +1,15 @@
 use super::*;
-use crate::capture::{ExecutionCapture, ProtocolCapture, RelayOutcome};
+use crate::capture::{
+    ExecutionCapture, InputOmission, InputOmissionReason, MAX_INPUT_CAPTURE_BYTES, ProtocolCapture,
+    RelayOutcome, sse::SseDecoder,
+};
+use crate::config::ExecutionLimits;
+use crate::resolution::ApiFormat;
 use crate::{
-    providers::openai::{OpenAiProvider, ProviderLimits},
+    providers::{ProviderLimits, ProviderTransport},
     test_support::{FakeServer, resolved_request_context_with_mode},
 };
+use axum::http::header;
 use axum::{
     body::{Body, Bytes, to_bytes},
     http::{HeaderValue, Response},
@@ -18,13 +24,15 @@ use std::{
 use tokio::sync::Notify;
 
 fn captured(execution: &ExecutionCapture) -> &OpenAiResponsesCapture {
-    let ProtocolCapture::OpenAiResponses(capture) = execution.protocol.as_ref().unwrap();
+    let ProtocolCapture::OpenAiResponses(capture) = execution.protocol.as_ref().unwrap() else {
+        panic!("expected the OpenAI Responses adapter");
+    };
     capture
 }
 
 async fn observer(mode: &'static str) -> ExecutionCapture {
     let context = resolved_request_context_with_mode("provider-secret", mode).await;
-    ExecutionCapture::for_openai_responses(&context, &HeaderMap::new(), br#"{"model":"requested","instructions":"prompt-canary","input":[{"role":"user","content":"hello"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"text":{"format":{"type":"json_schema","schema":{"description":"schema-canary"}}},"service_tier":"auto","metadata":{"label":"request-metadata-canary"},"safety_identifier":"safety-id-canary","prompt_cache_key":"cache-id-canary","user":"user-id-canary"}"#)
+    ExecutionCapture::for_request(ApiFormat::OpenAiResponses, &context, &HeaderMap::new(), br#"{"model":"requested","instructions":"prompt-canary","input":[{"role":"user","content":"hello"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"text":{"format":{"type":"json_schema","schema":{"description":"schema-canary"}}},"service_tier":"auto","metadata":{"label":"request-metadata-canary"},"safety_identifier":"safety-id-canary","prompt_cache_key":"cache-id-canary","user":"user-id-canary"}"#)
 }
 
 fn record_response(observer: &mut ExecutionCapture, content_type: &'static str) {
@@ -88,7 +96,7 @@ async fn captures_completed_items_only_in_order_without_duplication() {
         40
     );
     assert_eq!(
-        capture.facts.input.as_ref().unwrap()["instructions"],
+        capture.facts.input_json().unwrap()["instructions"],
         "prompt-canary"
     );
     assert!(capture.facts.output_complete);
@@ -198,7 +206,7 @@ async fn request_configuration_is_projected_out_of_input() {
     )
     .into_facts();
     assert_eq!(
-        capture.input.unwrap(),
+        capture.input_json().unwrap(),
         json!({
             "input": "hello", "instructions": "be brief",
             "tools": [{"type": "function", "name": "weather"}],
@@ -215,6 +223,34 @@ async fn request_configuration_is_projected_out_of_input() {
     );
     assert_eq!(capture.request_metadata["metadata"], request["metadata"]);
     assert_eq!(capture.request_metadata["prompt_cache_key"], "cache-key");
+}
+
+#[tokio::test]
+async fn configuration_beyond_the_parse_budget_stays_in_input() {
+    // Each member fits the budget on its own, but not together.
+    let half = json!({"schema": vec![json!({"": 0}); 5 * 1024]});
+    let request = json!({
+        "model": "requested", "input": "hello",
+        "text": half, "metadata": half, "temperature": 0.5,
+    });
+    let capture = OpenAiResponsesCapture::new(
+        &HeaderMap::new(),
+        request.to_string().as_bytes(),
+        IngestionMode::Full,
+    )
+    .into_facts();
+    assert_eq!(
+        capture.input_json().unwrap(),
+        json!({"input": "hello", "metadata": half})
+    );
+    assert_eq!(
+        capture.model_parameters,
+        json!({"temperature": 0.5, "text": half})
+            .as_object()
+            .unwrap()
+            .clone()
+    );
+    assert!(capture.request_metadata.is_empty());
 }
 
 #[tokio::test]
@@ -237,7 +273,7 @@ async fn agent_client_metadata_is_projected_out_of_input_in_both_modes() {
         let facts = capture.into_facts();
         if mode == IngestionMode::Full {
             assert_eq!(
-                facts.input.unwrap(),
+                facts.input_json().unwrap(),
                 json!({"input": "hello", "future_field": {"keep": true}})
             );
         } else {
@@ -256,7 +292,7 @@ async fn agent_client_metadata_is_projected_out_of_input_in_both_modes() {
     );
     assert!(capture.client_metadata().is_none());
     assert_eq!(
-        capture.into_facts().input.unwrap(),
+        capture.into_facts().input_json().unwrap(),
         json!({"input": "hello", "client_metadata": {"team": "search"}})
     );
 }
@@ -301,7 +337,8 @@ async fn completion_time_requires_sse_generated_content_in_either_ingestion_mode
         }
         // The upstream content type controls timing even if the request asks to stream.
         let context = resolved_request_context_with_mode("provider-secret", mode).await;
-        let mut observer = ExecutionCapture::for_openai_responses(
+        let mut observer = ExecutionCapture::for_request(
+            ApiFormat::OpenAiResponses,
             &context,
             &HeaderMap::new(),
             br#"{"stream":true,"input":"hello"}"#,
@@ -352,7 +389,8 @@ async fn oversized_and_malformed_events_do_not_prevent_later_facts() {
     let mut observer = observer("full").await;
     record_response(&mut observer, "text/event-stream");
     observer.push_bytes(b"data: malformed\n\n");
-    observer.push_bytes(format!("data: {}\n\n", "x".repeat(MAX_CAPTURE_BYTES + 1)).as_bytes());
+    observer
+        .push_bytes(format!("data: {}\n\n", "x".repeat(MAX_OUTPUT_CAPTURE_BYTES + 1)).as_bytes());
     observer.push_bytes(terminal("completed", 0).as_bytes());
     observer.end_body();
     let capture = captured(&observer);
@@ -430,7 +468,9 @@ async fn debug_record_is_emitted_once_and_only_at_debug_level() {
         observer.push_bytes(terminal("completed", 1).as_bytes());
         observer.end_body();
         observer.metadata["key_metadata"] = json!({"secret": "metadata-canary"});
-        let ProtocolCapture::OpenAiResponses(capture) = observer.protocol.as_mut().unwrap();
+        let ProtocolCapture::OpenAiResponses(capture) = observer.protocol.as_mut().unwrap() else {
+            panic!("expected the OpenAI Responses adapter");
+        };
         capture
             .facts
             .model_parameters
@@ -498,12 +538,13 @@ async fn upstream_read_timeout_is_logged_as_timeout() {
     })
     .await;
     let context = resolved_request_context_with_mode("provider-secret", "full").await;
-    let provider = OpenAiProvider::for_test(
+    let provider = ProviderTransport::for_test(
         format!("{}/v1", upstream.url),
         ProviderLimits {
-            active: 1,
-            read_timeout: Duration::from_millis(50),
-            ..ProviderLimits::default()
+            execution: ExecutionLimits {
+                stall_timeout: Duration::from_millis(50),
+                ..ExecutionLimits::default()
+            },
         },
     );
     let writer = LogWriter::default();
@@ -515,10 +556,10 @@ async fn upstream_read_timeout_is_logged_as_timeout() {
     let _guard = tracing::subscriber::set_default(subscriber);
     let response = provider
         .forward(
-            provider.try_admit().unwrap(),
+            provider.admit(),
             context,
             &HeaderMap::new(),
-            Bytes::from_static(b"{}"),
+            Bytes::from_static(br#"{"model":"requested"}"#),
         )
         .await
         .unwrap();
@@ -526,7 +567,6 @@ async fn upstream_read_timeout_is_logged_as_timeout() {
     let records = records(&writer);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["outcome"], "timeout");
-    assert!(provider.try_admit().is_ok());
 }
 
 #[tokio::test]
@@ -553,12 +593,13 @@ async fn native_http_relay_logs_once_on_eof_drop_and_unpolled_deadline() {
         })
         .await;
         let context = resolved_request_context_with_mode("provider-secret", "full").await;
-        let provider = OpenAiProvider::for_test(
+        let provider = ProviderTransport::for_test(
             format!("{}/v1", upstream.url),
             ProviderLimits {
-                active: 1,
-                execution_timeout: Duration::from_secs(1),
-                ..ProviderLimits::default()
+                execution: ExecutionLimits {
+                    max_execution_time: Duration::from_secs(1),
+                    ..ExecutionLimits::default()
+                },
             },
         );
         let writer = LogWriter::default();
@@ -570,10 +611,10 @@ async fn native_http_relay_logs_once_on_eof_drop_and_unpolled_deadline() {
         let _guard = tracing::subscriber::set_default(subscriber);
         let response = provider
             .forward(
-                provider.try_admit().unwrap(),
+                provider.admit(),
                 context,
                 &HeaderMap::new(),
-                Bytes::from_static(br#"{"input":"request-content"}"#),
+                Bytes::from_static(br#"{"model":"requested","input":"request-content"}"#),
             )
             .await
             .unwrap();
@@ -585,7 +626,6 @@ async fn native_http_relay_logs_once_on_eof_drop_and_unpolled_deadline() {
             RelayOutcome::Cancelled => drop(response),
             RelayOutcome::Timeout => {
                 tokio::time::sleep(Duration::from_millis(1100)).await;
-                assert!(provider.try_admit().is_ok());
                 drop(response);
             }
             RelayOutcome::TransportError => unreachable!(),
@@ -598,7 +638,6 @@ async fn native_http_relay_logs_once_on_eof_drop_and_unpolled_deadline() {
             assert_eq!(records[0]["output_complete"], true);
             assert!(records[0]["first_byte_ms"].is_number());
         }
-        assert!(provider.try_admit().is_ok());
         assert_eq!(upstream.calls(), 1);
     }
 }
@@ -617,12 +656,13 @@ async fn provider_future_finalizes_on_timeout_and_cancellation_before_headers() 
         })
         .await;
         let context = resolved_request_context_with_mode("provider-secret", "full").await;
-        let provider = OpenAiProvider::for_test(
+        let provider = ProviderTransport::for_test(
             format!("{}/v1", upstream.url),
             ProviderLimits {
-                active: 1,
-                headers_timeout: Duration::from_millis(100),
-                ..ProviderLimits::default()
+                execution: ExecutionLimits {
+                    stall_timeout: Duration::from_millis(100),
+                    ..ExecutionLimits::default()
+                },
             },
         );
         let writer = LogWriter::default();
@@ -634,10 +674,10 @@ async fn provider_future_finalizes_on_timeout_and_cancellation_before_headers() 
         let _guard = tracing::subscriber::set_default(subscriber);
         let headers = HeaderMap::new();
         let call = provider.forward(
-            provider.try_admit().unwrap(),
+            provider.admit(),
             context,
             &headers,
-            Bytes::from_static(b"{}"),
+            Bytes::from_static(br#"{"model":"requested"}"#),
         );
         if cancel {
             tokio::select! {
@@ -657,7 +697,6 @@ async fn provider_future_finalizes_on_timeout_and_cancellation_before_headers() 
             if cancel { "cancelled" } else { "timeout" }
         );
         assert!(records[0]["http_status"].is_null());
-        assert!(provider.try_admit().is_ok());
     }
 }
 
@@ -709,19 +748,20 @@ async fn client_compression_preferences_do_not_disable_capture() {
             let received = received.clone();
             async move {
                 let bytes = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
-                *received.lock().unwrap() = serde_json::from_slice(&bytes).unwrap();
+                *received.lock().unwrap() = crate::test_support::upload_json(&bytes);
                 Response::new(Body::from("{}"))
             }
         })
         .await;
-        let telemetry = crate::telemetry::Telemetry::new(
+        let telemetry = telemetry::Telemetry::new(
             &crate::resolution::ControlPlaneConfig::new(&collector.url, "test-service-key")
                 .unwrap(),
+            telemetry::DEFAULT_RETAINED_BYTES,
         )
         .unwrap();
         let context = resolved_request_context_with_mode("provider-secret", "full").await;
         let provider =
-            OpenAiProvider::for_test(format!("{}/v1", upstream.url), ProviderLimits::default())
+            ProviderTransport::for_test(format!("{}/v1", upstream.url), ProviderLimits::default())
                 .with_telemetry(telemetry.clone());
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -730,10 +770,12 @@ async fn client_compression_preferences_do_not_disable_capture() {
         );
         let forwarded = provider
             .forward(
-                provider.try_admit().unwrap(),
+                provider.admit(),
                 context,
                 &headers,
-                Bytes::from(json!({"input":"hello","stream":streaming}).to_string()),
+                Bytes::from(
+                    json!({"model":"requested","input":"hello","stream":streaming}).to_string(),
+                ),
             )
             .await
             .unwrap();
@@ -751,7 +793,7 @@ async fn client_compression_preferences_do_not_disable_capture() {
         assert!(metadata.get("output_complete").is_none());
         assert!(metadata.get("provider_status").is_none());
         assert!(metadata.get("native_usage").is_none());
-        assert_eq!(metadata["langfuse.gateway.response.id"], "resp-1");
+        assert_eq!(metadata["langfuse.gateway.upstream.response.id"], "resp-1");
         assert!(
             uploaded_attribute(&upload, "langfuse.observation.usage_details")["input_tokens"]
                 .is_number()
@@ -780,18 +822,19 @@ async fn codex_body_metadata_reaches_the_generation_without_agent_headers() {
         let received = received.clone();
         async move {
             let bytes = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
-            *received.lock().unwrap() = serde_json::from_slice(&bytes).unwrap();
+            *received.lock().unwrap() = crate::test_support::upload_json(&bytes);
             Response::new(Body::from("{}"))
         }
     })
     .await;
-    let telemetry = crate::telemetry::Telemetry::new(
+    let telemetry = telemetry::Telemetry::new(
         &crate::resolution::ControlPlaneConfig::new(&collector.url, "test-service-key").unwrap(),
+        telemetry::DEFAULT_RETAINED_BYTES,
     )
     .unwrap();
     let context = resolved_request_context_with_mode("provider-secret", "full").await;
     let provider =
-        OpenAiProvider::for_test(format!("{}/v1", upstream.url), ProviderLimits::default())
+        ProviderTransport::for_test(format!("{}/v1", upstream.url), ProviderLimits::default())
             .with_telemetry(telemetry.clone());
     let turn_metadata = json!({
         "installation_id": "install-1", "session_id": "routing-session",
@@ -809,7 +852,7 @@ async fn codex_body_metadata_reaches_the_generation_without_agent_headers() {
     });
     let forwarded = provider
         .forward(
-            provider.try_admit().unwrap(),
+            provider.admit(),
             context,
             &HeaderMap::new(),
             Bytes::from(body.to_string()),
@@ -843,7 +886,7 @@ async fn codex_body_metadata_reaches_the_generation_without_agent_headers() {
     assert_eq!(metadata["agent.request_kind"], "turn");
     assert_eq!(metadata["agent.sandbox_mode"], "workspace-write");
     assert!(metadata.get("agent.tool_namespaces_info").is_none());
-    assert_eq!(metadata["langfuse.gateway.response.id"], "resp-1");
+    assert_eq!(metadata["langfuse.gateway.upstream.response.id"], "resp-1");
     assert_eq!(
         uploaded_attribute(&upload, "langfuse.observation.input"),
         json!({"input": "hello"})
@@ -853,10 +896,14 @@ async fn codex_body_metadata_reaches_the_generation_without_agent_headers() {
 #[tokio::test]
 async fn capture_regression_large_request_does_not_invalidate_output() {
     let context = resolved_request_context_with_mode("provider-secret", "full").await;
-    let request = json!({"input": "x".repeat(MAX_CAPTURE_BYTES)}).to_string();
+    let request = json!({"input": "x".repeat(MAX_INPUT_CAPTURE_BYTES)}).to_string();
     for streaming in [false, true] {
-        let mut observer =
-            ExecutionCapture::for_openai_responses(&context, &HeaderMap::new(), request.as_bytes());
+        let mut observer = ExecutionCapture::for_request(
+            ApiFormat::OpenAiResponses,
+            &context,
+            &HeaderMap::new(),
+            request.as_bytes(),
+        );
         record_response(
             &mut observer,
             if streaming {
@@ -874,11 +921,39 @@ async fn capture_regression_large_request_does_not_invalidate_output() {
         observer.end_body();
         let facts = &captured(&observer).facts;
         assert!(!facts.input_complete);
+        assert!(facts.input.is_none());
+        assert_eq!(
+            facts.input_omission,
+            Some(InputOmission {
+                reason: InputOmissionReason::SizeLimit,
+                body_bytes: request.len(),
+            })
+        );
         assert!(
             facts.output_complete,
             "response capture must be independent of request size"
         );
     }
+}
+
+#[tokio::test]
+async fn request_at_input_limit_is_captured_in_full() {
+    let context = resolved_request_context_with_mode("provider-secret", "full").await;
+    let request = json!({"input": "x".repeat(MAX_INPUT_CAPTURE_BYTES - 12)}).to_string();
+    assert_eq!(request.len(), MAX_INPUT_CAPTURE_BYTES);
+    let observer = ExecutionCapture::for_request(
+        ApiFormat::OpenAiResponses,
+        &context,
+        &HeaderMap::new(),
+        request.as_bytes(),
+    );
+    let facts = &captured(&observer).facts;
+    assert!(facts.input_complete);
+    assert!(facts.input_omission.is_none());
+    assert_eq!(
+        facts.input_json().unwrap()["input"].as_str().unwrap().len(),
+        MAX_INPUT_CAPTURE_BYTES - 12
+    );
 }
 
 #[tokio::test]
@@ -892,7 +967,8 @@ async fn capture_regression_preserves_native_request_and_usage() {
         ] {
             let request = json!({"model":"requested","input":input,"instructions":"be brief","future_request_field":{"enabled":true}});
             for streaming in [false, true] {
-                let mut execution = ExecutionCapture::for_openai_responses(
+                let mut execution = ExecutionCapture::for_request(
+                    ApiFormat::OpenAiResponses,
                     &context,
                     &HeaderMap::new(),
                     request.to_string().as_bytes(),
@@ -917,7 +993,7 @@ async fn capture_regression_preserves_native_request_and_usage() {
                 let mut expected_input = request.clone();
                 expected_input.as_object_mut().unwrap().remove("model");
                 assert_eq!(
-                    facts.input.as_ref(),
+                    facts.input_json().as_ref(),
                     if mode == "full" {
                         Some(&expected_input)
                     } else {

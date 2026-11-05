@@ -1,17 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
-import { PlusIcon } from "lucide-react";
+import { PlusIcon } from "@langfuse/icons";
 import { useSession } from "next-auth/react";
-import { StringParam, useQueryParam, withDefault } from "use-query-params";
+import {
+  ArrayParam,
+  StringParam,
+  useQueryParam,
+  withDefault,
+} from "use-query-params";
+import { type Role } from "@langfuse/shared";
 
 import { Alert } from "@/src/components/design-system/Alert/Alert";
 import { type AsyncTableData } from "@/src/components/design-system/table/Table";
 import useSessionStorage from "@/src/components/useSessionStorage";
 import { env } from "@/src/env.mjs";
-import { useHasEntitlement } from "@/src/features/entitlements";
-import { showSuccessToast } from "@/src/features/notifications";
+import { useHasEntitlement } from "@/src/features/entitlements/hooks";
+import { default as useIsFeatureEnabled } from "@/src/features/feature-flags/hooks/useIsFeatureEnabled";
+import { showSuccessToast } from "@/src/features/notifications/showSuccessToast";
 import { CreateProjectMemberDialogController } from "@/src/features/rbac/components/CreateProjectMemberDialogController";
 import { useHasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
 import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
+import { orderedRoles } from "@/src/features/rbac/constants/orderedRoles";
 import { api } from "@/src/utils/api";
 import { safeExtract } from "@/src/utils/map-utils";
 import type { RouterOutput } from "@/src/utils/types";
@@ -52,6 +60,23 @@ export function ConnectedMembersSettingsTable({
     scope: "projectMembers:CUD",
   });
 
+  const canManageOrgOwnership = useHasOrganizationAccess({
+    organizationId: orgId,
+    scope: "organizationMembers:manageOwnership",
+  });
+
+  const isAiGatewayEnabled = useIsFeatureEnabled("aiGateway", {
+    enableForAdmins: false,
+    organizationId: orgId,
+  });
+
+  // Org owners outrank any project role override they hold.
+  const canManageProjectOwnership =
+    useHasProjectAccess({
+      projectId: project?.id,
+      scope: "projectMembers:manageOwnership",
+    }) || canManageOrgOwnership;
+
   const projectRolesEntitlement = useHasEntitlement("rbac-project-roles");
   const [updatingOrgRoleMembershipIds, setUpdatingOrgRoleMembershipIds] =
     useState<Set<string>>(() => new Set());
@@ -65,18 +90,32 @@ export function ConnectedMembersSettingsTable({
     withDefault(StringParam, null),
   );
 
-  const [paginationState, setPaginationState] = useSessionStorage(
+  const [rolesParam, setRolesParam] = useQueryParam("roles", ArrayParam);
+  const roles = (rolesParam ?? []).filter(isRole);
+  const rolesKey = roles.toSorted().join(",");
+
+  const [storedPagination, setPaginationState] = useSessionStorage<{
+    pageIndex: number;
+    pageSize: number;
+    rolesKey?: string;
+  }>(
     project
       ? `projectMembers_${project.id}_pagination`
       : `orgMembers_${orgId}_pagination`,
     { pageIndex: 0, pageSize: 10 },
   );
+  // The stored page belongs to the role filter it was paged under; any other
+  // filter (dropdown, URL, or history navigation) starts on the first page.
+  const paginationState = {
+    pageIndex:
+      (storedPagination.rolesKey ?? "") === rolesKey
+        ? storedPagination.pageIndex
+        : 0,
+    pageSize: storedPagination.pageSize,
+  };
 
   useEffect(() => {
-    setPaginationState((previous) => ({
-      pageIndex: 0,
-      pageSize: previous.pageSize,
-    }));
+    setPaginationState((previous) => ({ ...previous, pageIndex: 0 }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
 
@@ -84,6 +123,7 @@ export function ConnectedMembersSettingsTable({
     {
       orgId,
       searchQuery: searchQuery ?? undefined,
+      roles,
       page: paginationState.pageIndex,
       limit: paginationState.pageSize,
     },
@@ -94,6 +134,7 @@ export function ConnectedMembersSettingsTable({
     {
       projectId: project?.id ?? "NOT ENABLED",
       searchQuery: searchQuery ?? undefined,
+      roles,
       page: paginationState.pageIndex,
       limit: paginationState.pageSize,
     },
@@ -113,6 +154,7 @@ export function ConnectedMembersSettingsTable({
       utils.members.invalidate();
       if (data.userId === session.data?.user?.id) session.update();
       showSuccessToast({
+        operation: "organization_role.update",
         title: "Saved",
         description: "Organization role updated successfully",
         duration: 2000,
@@ -125,6 +167,7 @@ export function ConnectedMembersSettingsTable({
       utils.members.invalidate();
       if (data.userId === session.data?.user?.id) session.update();
       showSuccessToast({
+        operation: "project_role.update",
         title: "Saved",
         description: "Project role updated successfully",
         duration: 2000,
@@ -192,6 +235,9 @@ export function ConnectedMembersSettingsTable({
           currentUserId={session.data?.user?.id}
           hasOrgCudAccess={hasOrgCudAccess}
           hasProjectCudAccess={hasProjectCudAccess}
+          canManageOrgOwnership={canManageOrgOwnership}
+          canManageProjectOwnership={canManageProjectOwnership}
+          isAiGatewayEnabled={isAiGatewayEnabled}
           projectRolesEntitlement={projectRolesEntitlement}
           showFeaturePreviews={
             !project && hasOrgCudAccess && orgId !== env.NEXT_PUBLIC_DEMO_ORG_ID
@@ -240,7 +286,7 @@ export function ConnectedMembersSettingsTable({
             );
           }}
           onUpdateProjectRole={(member, projectRole) => {
-            if (!project) return;
+            if (!project || projectRole === "AI_GATEWAY") return;
             if (
               member.meta.userId === session.data?.user?.id &&
               !confirm(
@@ -277,6 +323,10 @@ export function ConnectedMembersSettingsTable({
             value: searchQuery ?? "",
             onChange: (value) => setSearchQuery(value || null),
           }}
+          roleFilter={{
+            value: roles,
+            onChange: (value) => setRolesParam(value.length > 0 ? value : null),
+          }}
           toolbarActions={[
             {
               id: "add-member",
@@ -287,19 +337,24 @@ export function ConnectedMembersSettingsTable({
               loading: isSubmitting,
               hasAccess,
               usageLimit,
-              icon: <PlusIcon className="size-4" aria-hidden="true" />,
+              icon: <PlusIcon size="base" aria-hidden="true" />,
               onClick: openDialog,
             },
           ]}
           pagination={{
+            mode: "offset",
             totalCount: members.data?.totalCount ?? null,
-            onChange: setPaginationState,
+            onChange: (state) => setPaginationState({ ...state, rolesKey }),
             state: paginationState,
           }}
         />
       )}
     </CreateProjectMemberDialogController>
   );
+}
+
+function isRole(value: string | null): value is Role {
+  return value !== null && Object.hasOwn(orderedRoles, value);
 }
 
 function convertToTableRow(
