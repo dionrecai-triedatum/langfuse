@@ -15,7 +15,7 @@ import {
   DataTableControlsProvider,
 } from "@/src/components/table/data-table-controls";
 import { StickySearchableTableFilterLayout } from "@/src/components/table/resizable-filter-layout";
-import { createBadgeTableColumn } from "@/src/components/design-system/table/columns/createBadgeTableColumn";
+import { createTagTableColumn } from "@/src/components/design-system/table/columns/createTagTableColumn";
 import { createLinkTableColumn } from "@/src/components/design-system/table/columns/createLinkTableColumn";
 import { createTextTableColumn } from "@/src/components/design-system/table/columns/createTextTableColumn";
 import { type LangfuseColumnDef } from "@/src/components/table/types";
@@ -23,24 +23,26 @@ import { getUsersFilterConfig } from "@/src/features/filters/config/users-config
 import {
   USERS_FIELD_REGISTRY,
   LEGACY_USERS_FIELD_REGISTRY,
+} from "@/src/features/filters/config/usersSearchRegistry";
+import {
   useSidebarFilterPresentation,
   useSidebarFilterStateCore,
   type FacetOptions,
   type UseSidebarFilterStateOptions,
-  buildSidebarFilterSessionContextId,
-  sortOptionValues,
-} from "@/src/features/filters";
+} from "@/src/features/filters/hooks/useSidebarFilterState";
 
-import { useDetailPageLists } from "@/src/features/navigate-detail-pages";
-import { useEventsFilterOptions } from "@/src/features/events";
-import { TableSearchBar, toObservedOptions } from "@/src/features/search-bar";
+import { buildSidebarFilterSessionContextId } from "@/src/features/filters/lib/persistedSidebarFilterQuery";
+import { sortOptionValues } from "@/src/features/filters/lib/option-sort";
+
+import { useDetailPageLists } from "@/src/features/navigate-detail-pages/DetailPageListsProvider";
+import { useEventsFilterOptions } from "@/src/features/events/hooks/useEventsFilterOptions";
+import { TableSearchBar } from "@/src/features/search-bar/components/TableSearchBar";
+import { toObservedOptions } from "@/src/features/search-bar/lib/observed-options";
 
 import { useTableViewManager } from "@/src/components/table/table-view-presets/hooks/useTableViewManager";
 import { useTableViewFilterChange } from "@/src/components/table/table-view-presets/hooks/useTableViewFilterChange";
-import {
-  useColumnOrder,
-  useColumnVisibility,
-} from "@/src/features/column-visibility";
+import { default as useColumnOrder } from "@/src/features/column-visibility/hooks/useColumnOrder";
+import { default as useColumnVisibility } from "@/src/features/column-visibility/hooks/useColumnVisibility";
 import { api } from "@/src/utils/api";
 import { compactNumberFormatter, usdFormatter } from "@/src/utils/numbers";
 import { type RouterOutput } from "@/src/utils/types";
@@ -53,7 +55,7 @@ import {
 import { joinTableCoreAndMetrics } from "@/src/components/table/utils/joinTableCoreAndMetrics";
 import { useTableDateRange } from "@/src/hooks/useTableDateRange";
 import { toAbsoluteTimeRange } from "@/src/utils/date-range-utils";
-import { TableHeaderControls } from "@/src/components/table/table-header-controls";
+import { TableHeaderControls } from "@/src/components/table/TableHeaderControls";
 
 type RowData = {
   userId: string;
@@ -61,6 +63,7 @@ type RowData = {
   firstEvent: string;
   lastEvent: string;
   totalEvents: string;
+  totalTraces: string;
   totalTokens: string;
   totalCost: string;
 };
@@ -349,13 +352,17 @@ export function UsersTable({
   type UserCoreOutput = RouterOutput["users"]["all"]["users"][number];
   type UserMetricsOutput = RouterOutput["users"]["metrics"][number];
 
-  type CoreType = Omit<UserCoreOutput, "userId"> & { id: string };
+  type CoreType = Omit<UserCoreOutput, "userId"> & {
+    id: string;
+    traceCount: UserCoreOutput["totalTraces"];
+  };
   type MetricType = Omit<UserMetricsOutput, "userId"> & { id: string };
 
   const userRowData = joinTableCoreAndMetrics<CoreType, MetricType>(
     users.data?.users.map((u) => ({
       ...u,
       id: u.userId,
+      traceCount: u.totalTraces,
     })),
     userMetrics.data?.map((u) => ({
       ...u,
@@ -400,7 +407,7 @@ export function UsersTable({
         };
       },
     }),
-    createBadgeTableColumn<RowData>({
+    createTagTableColumn<RowData>({
       accessorKey: "environment",
       header: "Environment",
       size: 150,
@@ -425,6 +432,13 @@ export function UsersTable({
       size: 150,
       mapValue: (value) =>
         userMetrics.isSuccess ? (value ?? undefined) : { type: "loading" },
+    }),
+    createTextTableColumn<RowData>({
+      accessorKey: "totalTraces",
+      header: "Trace Count",
+      size: 120,
+      mapValue: (value) =>
+        users.isSuccess ? (value ?? undefined) : { type: "loading" },
     }),
     createTextTableColumn<RowData>({
       accessorKey: "totalEvents",
@@ -527,6 +541,7 @@ export function UsersTable({
         <StickySearchableTableFilterLayout
           search={
             <TableSearchBar
+              size={showControlsInPageHeader ? "large" : "default"}
               key={`${viewControllers.filterEditorResetKey}-${queryFilter.draftResetKey}`}
               isV4={isV4}
               filterState={queryFilter.searchBarFilterState}
@@ -588,6 +603,9 @@ export function UsersTable({
                           return {
                             userId: t.id,
                             environment: t.environment ?? undefined,
+                            totalTraces: compactNumberFormatter(
+                              Number(t.traceCount),
+                            ),
                             firstEvent:
                               t.firstTrace?.toLocaleString() ?? "No event yet",
                             lastEvent:

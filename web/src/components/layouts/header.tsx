@@ -1,7 +1,8 @@
-/* eslint-disable @repo/no-style-props, @repo/no-margin-on-root-elements */
+/* eslint-disable @repo/no-style-props, @repo/no-margin-on-root-elements, @repo/component-file-structure */
 import Link from "next/link";
 import DocPopup from "@/src/components/layouts/doc-popup";
-import { Badge } from "@/src/components/ui/badge";
+import { Badge } from "@/src/components/design-system/Badge/Badge";
+import { InternalFeatureBadge } from "@/src/features/feature-flags/components/InternalFeatureBadge";
 import {
   type Status,
   StatusBadge,
@@ -14,6 +15,8 @@ type HeaderProps = {
   status?: Status;
   /** Plain informational badge next to the title, e.g. "Demo Org". Not a status. */
   labelBadge?: string;
+  /** Marks a surface only internal users can see with the shared internal-feature badge. */
+  internal?: boolean;
   label?: {
     text: string;
     href: string;
@@ -84,18 +87,31 @@ function BaseHeader({ ...props }: HeaderProps & { level: "h3" | "h4" | "h5" }) {
             ) : null}
           </div>
           {props.status && <StatusBadge type={props.status} />}
+          {props.internal && <InternalFeatureBadge />}
           {props.labelBadge && (
-            <Badge variant="secondary">{props.labelBadge}</Badge>
+            <Badge
+              color="filled"
+              font="mono"
+              size="sm"
+              text={props.labelBadge}
+            />
           )}
           {props.label && (
-            <Link href={props.label.href}>
-              <StatusBadge type={props.label.text} />
+            <Link href={props.label.href} className="flex">
+              <Badge
+                color="filled"
+                font="mono"
+                size="sm"
+                text={props.label.text}
+              />
             </Link>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          {props.actionButtons ?? null}
-        </div>
+        {props.actionButtons ? (
+          <div className="flex flex-wrap items-center gap-3">
+            {props.actionButtons}
+          </div>
+        ) : null}
       </div>
     </div>
   );

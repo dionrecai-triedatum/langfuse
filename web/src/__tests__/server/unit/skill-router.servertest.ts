@@ -6,7 +6,7 @@ import { createInnerTRPCContext } from "@/src/server/api/trpc";
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
-  getFileContent: vi.fn(),
+  getFileContents: vi.fn(),
   createVersion: vi.fn(),
   setLabels: vi.fn(),
   setTags: vi.fn(),
@@ -22,10 +22,10 @@ vi.mock("@/src/server/auth", () => ({ getServerAuthSession: vi.fn() }));
 vi.mock("@/src/features/posthog-analytics/server/backendActivity", () => ({
   recordBackendActivity: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/src/features/skills/server/index", () => ({
+vi.mock("@/src/features/skills/server/skill-service", () => ({
   SkillService: class {
     get = mocks.get;
-    getFileContent = mocks.getFileContent;
+    getFileContents = mocks.getFileContents;
     createVersion = mocks.createVersion;
     setLabels = mocks.setLabels;
     setTags = mocks.setTags;
@@ -78,6 +78,7 @@ function createCaller(
         v4BetaToggleVisible: false,
         observationEvals: false,
         experimentsV4Enabled: false,
+        langfuseTopics: false,
       },
     },
     environment: {

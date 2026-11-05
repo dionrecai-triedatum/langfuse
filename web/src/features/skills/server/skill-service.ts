@@ -17,17 +17,31 @@ import {
   type ListSkillsQuery,
   type FilterState,
   type SkillSelector,
+  type SkillVersionResponse,
+  type TriggerEventAction,
 } from "@langfuse/shared";
 import type { Prisma, PrismaClient, SkillBlob } from "@langfuse/shared/src/db";
+import {
+  EntityChangeQueue,
+  QueueJobs,
+  QueueName,
+  logger,
+  SkillCacheService,
+  escapeSqlLikePattern,
+  redis,
+} from "@langfuse/shared/src/server";
 import type { ProjectAuthedContext } from "@/src/server/api/trpc";
 import type { AuthorizationContext } from "@/src/features/auth/policy/types";
-import { auditLog } from "@/src/features/audit-logs/server";
-import { throwIfNoProjectAccess } from "@/src/features/rbac";
+import { auditLog } from "@/src/features/audit-logs/auditLog";
+import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { checkHasProtectedLabels } from "@/src/features/prompts/server/utils/checkHasProtectedLabels";
 import {
   authorizeProtectedLabelMutation,
   type ApiKeyProjectContext,
 } from "@/src/features/prompts/server/utils/authorizeProtectedLabelMutation";
+import { type SkillListOrderBy } from "../constants/skillsSorting";
+
+type SkillChange = { skill: SkillVersionResponse; action: TriggerEventAction };
 
 type SkillActor =
   | Pick<ProjectAuthedContext, "session">
@@ -123,7 +137,11 @@ function serializeVersion(skill: SkillWithRelations) {
 }
 
 export class SkillService {
-  constructor(private readonly prisma: PrismaClient) {}
+  private readonly skillCacheService: SkillCacheService;
+
+  constructor(private readonly prisma: PrismaClient) {
+    this.skillCacheService = new SkillCacheService(prisma, redis);
+  }
 
   async skillVersions(params: {
     projectId: string;
@@ -173,19 +191,24 @@ export class SkillService {
     });
     const name = frontmatter.name;
 
+    const changes: SkillChange[] = [];
     const skillId = await this.prisma.$transaction(async (tx) => {
       await this.lockSkill(tx, params.projectId, name);
       const latest = await tx.skill.findFirst({
         where: { projectId: params.projectId, name },
         orderBy: { version: "desc" },
-        select: { id: true, version: true, labels: true, tags: true },
+        include: skillFilesInclude,
       });
       if (latest) {
-        await this.removeLatestLabel({
+        const updatedLatest = await this.removeLatestLabel({
           tx,
           projectId: params.projectId,
           latest,
           actor: params.actor,
+        });
+        changes.push({
+          action: "updated",
+          skill: serializeVersion({ ...latest, ...updatedLatest }),
         });
       }
       const versionFiles = await this.storeVersionFiles({
@@ -195,6 +218,7 @@ export class SkillService {
         referencedBlobs,
       });
       const skill = await tx.skill.create({
+        include: skillFilesInclude,
         data: {
           id: randomUUID(),
           projectId: params.projectId,
@@ -240,9 +264,11 @@ export class SkillService {
         },
         tx,
       );
+      changes.push({ action: "created", skill: serializeVersion(skill) });
       return skill.id;
     });
 
+    await this.publishChanges(changes, params.actor);
     return this.getById({ projectId: params.projectId, skillId });
   }
 
@@ -250,40 +276,92 @@ export class SkillService {
     projectId: string;
     name: string;
     selector: SkillSelector;
+    /** Use latest when no selector is supplied and production is unset. */
+    fallbackToLatest?: boolean;
+    includeContent?: boolean;
   }) {
     const skill = await this.findSkillVersion(params);
-    return serializeVersion(skill);
+    const version = serializeVersion(skill);
+    if (!params.includeContent) return version;
+
+    const { data } = await this.getFileContents({
+      projectId: params.projectId,
+      sha256Hashes: version.files.map((file) => file.sha256Hash),
+    });
+    const contentByHash = new Map(
+      data.map(({ sha256Hash, content }) => [sha256Hash, content]),
+    );
+    return {
+      ...version,
+      files: version.files.map((file) => ({
+        ...file,
+        content: contentByHash.get(file.sha256Hash),
+      })),
+    };
   }
 
   async loadResource(params: {
     projectId: string;
     name: string;
     selector: SkillSelector;
+    /** Use latest when no selector is supplied and production is unset. */
+    fallbackToLatest?: boolean;
     path: string;
   }): Promise<string> {
     const skill = await this.findSkillVersion(params);
     const file = skill.files.find(({ path }) => path === params.path);
     if (!file) throw new LangfuseNotFoundError("Skill resource not found");
-    return (
-      await this.getFileContent({
-        projectId: params.projectId,
-        fileId: file.id,
-      })
-    ).content;
+    const { data } = await this.getFileContents({
+      projectId: params.projectId,
+      sha256Hashes: [file.blob.sha256Hash],
+    });
+    return data[0]!.content;
   }
 
-  async getFileContent(params: { projectId: string; fileId: string }) {
-    const file = await this.prisma.skillFile.findFirst({
-      where: { projectId: params.projectId, id: params.fileId },
-      select: { blob: { select: { content: true } } },
+  async getFileContents(params: { projectId: string; sha256Hashes: string[] }) {
+    const hashes = [...new Set(params.sha256Hashes)];
+    const where = {
+      projectId: params.projectId,
+      sha256Hash: { in: hashes },
+      files: { some: { projectId: params.projectId } },
+    } satisfies Prisma.SkillBlobWhereInput;
+    const blobs = await this.prisma.skillBlob.findMany({
+      where,
+      select: { contentLength: true },
     });
-    if (!file) throw new LangfuseNotFoundError("Skill file not found");
-    return { content: file.blob.content };
+    if (blobs.length !== hashes.length) {
+      throw new LangfuseNotFoundError("One or more skill files not found");
+    }
+    // Check metadata before loading text so oversized batches stay bounded.
+    if (
+      blobs.reduce((total, blob) => total + blob.contentLength, 0) > 10_000_000
+    ) {
+      throw new InvalidRequestError(
+        "Skill file contents must not exceed 10000000 UTF-8 bytes per batch. Request fewer hashes.",
+      );
+    }
+    const data = await this.prisma.skillBlob.findMany({
+      where,
+      select: { sha256Hash: true, content: true },
+    });
+    if (data.length !== hashes.length) {
+      throw new LangfuseNotFoundError("One or more skill files not found");
+    }
+    const byHash = new Map(data.map((blob) => [blob.sha256Hash, blob]));
+    return {
+      data: hashes.map((sha256Hash) => ({
+        sha256Hash,
+        content: byHash.get(sha256Hash)!.content,
+      })),
+    };
   }
 
   async list(params: {
     projectId: string;
-    input: ListSkillsQuery & { filter?: FilterState };
+    input: ListSkillsQuery & {
+      filter?: FilterState;
+      orderBy?: SkillListOrderBy;
+    };
   }) {
     const filters = this.listFilterConditions(params.input.filter ?? []);
     const where: Prisma.SkillWhereInput = {
@@ -295,13 +373,13 @@ export class SkillService {
             OR: [
               {
                 name: {
-                  contains: params.input.search,
+                  contains: escapeSqlLikePattern(params.input.search),
                   mode: "insensitive" as const,
                 },
               },
               {
                 description: {
-                  contains: params.input.search,
+                  contains: escapeSqlLikePattern(params.input.search),
                   mode: "insensitive" as const,
                 },
               },
@@ -323,10 +401,23 @@ export class SkillService {
           }
         : {}),
     };
+    const sortFields = {
+      name: "name",
+      latestVersion: "version",
+      tags: "tags",
+      latestVersionCreatedAt: "createdAt",
+    } satisfies Record<
+      SkillListOrderBy["column"],
+      keyof Prisma.SkillOrderByWithRelationInput
+    >;
+    const sortField = params.input.orderBy
+      ? sortFields[params.input.orderBy.column]
+      : "updatedAt";
+    const sortOrder = params.input.orderBy?.order === "ASC" ? "asc" : "desc";
     const [latestVersions, totalItems] = await Promise.all([
       this.prisma.skill.findMany({
         where,
-        orderBy: [{ updatedAt: "desc" }, { name: "asc" }],
+        orderBy: [{ [sortField]: sortOrder }, { name: "asc" }],
         skip: (params.input.page - 1) * params.input.limit,
         take: params.input.limit,
         select: {
@@ -395,13 +486,19 @@ export class SkillService {
   }
 
   async filterOptions(params: { projectId: string }) {
-    const skills = await this.prisma.skill.findMany({
-      where: {
-        projectId: params.projectId,
-        labels: { has: SKILL_LATEST_LABEL },
-      },
-      select: { tags: true },
-    });
+    const [skills, labeledVersions] = await Promise.all([
+      this.prisma.skill.findMany({
+        where: {
+          projectId: params.projectId,
+          labels: { has: SKILL_LATEST_LABEL },
+        },
+        select: { name: true, tags: true },
+      }),
+      this.prisma.skill.findMany({
+        where: { projectId: params.projectId, labels: { isEmpty: false } },
+        select: { labels: true },
+      }),
+    ]);
     const counts = new Map<string, number>();
     for (const skill of skills) {
       for (const tag of new Set(skill.tags)) {
@@ -409,6 +506,12 @@ export class SkillService {
       }
     }
     return {
+      labels: [
+        ...new Set(labeledVersions.flatMap(({ labels }) => labels)),
+      ].sort((a, b) => a.localeCompare(b)),
+      names: [...new Set(skills.map(({ name }) => name))].sort((a, b) =>
+        a.localeCompare(b),
+      ),
       tags: [...counts]
         .map(([value, count]) => ({ value, count }))
         .sort((a, b) => a.value.localeCompare(b.value)),
@@ -423,6 +526,7 @@ export class SkillService {
     actor: SkillActor;
   }) {
     const input = UpdateSkillLabelsBodySchema.parse({ labels: params.labels });
+    const changes: SkillChange[] = [];
     const skillId = await this.prisma.$transaction(async (tx) => {
       await this.lockSkill(tx, params.projectId, params.name);
       const target = await tx.skill.findFirst({
@@ -447,7 +551,7 @@ export class SkillService {
 
       const versions = await tx.skill.findMany({
         where: { projectId: params.projectId, name: params.name },
-        select: { id: true, labels: true },
+        include: skillFilesInclude,
       });
       const nextLabels = [...new Set(input.labels)];
       for (const version of versions) {
@@ -461,12 +565,21 @@ export class SkillService {
               ]
             : version.labels.filter((label) => !nextLabels.includes(label));
         if (version.labels.join("\0") === labels.join("\0")) continue;
-        await tx.skill.update({
+        const updated = await tx.skill.update({
           where: {
             projectId: params.projectId,
             id: version.id,
           },
           data: { labels: { set: labels } },
+          select: { updatedAt: true },
+        });
+        changes.push({
+          action: "updated",
+          skill: serializeVersion({
+            ...version,
+            labels,
+            updatedAt: updated.updatedAt,
+          }),
         });
         await auditLog(
           {
@@ -483,6 +596,7 @@ export class SkillService {
       }
       return target.id;
     });
+    await this.publishChanges(changes, params.actor);
     return this.getById({ projectId: params.projectId, skillId });
   }
 
@@ -494,6 +608,7 @@ export class SkillService {
     actor: SkillActor;
   }) {
     const input = UpdateSkillTagsBodySchema.parse({ tags: params.tags });
+    const changes: SkillChange[] = [];
     const skillId = await this.prisma.$transaction(async (tx) => {
       await this.lockSkill(tx, params.projectId, params.name);
       const target = await tx.skill.findFirst({
@@ -507,10 +622,27 @@ export class SkillService {
       if (!target) throw new LangfuseNotFoundError("Skill not found");
 
       const tags = [...new Set(input.tags)];
-      await tx.skill.updateMany({
-        where: { projectId: params.projectId, name: params.name },
+      const updated = await tx.skill.updateManyAndReturn({
+        where: {
+          projectId: params.projectId,
+          name: params.name,
+          NOT: { tags: { equals: tags } },
+        },
         data: { tags: { set: tags } },
+        select: { id: true },
       });
+      if (updated.length > 0) {
+        const versions = await tx.skill.findMany({
+          where: {
+            projectId: params.projectId,
+            id: { in: updated.map(({ id }) => id) },
+          },
+          include: skillFilesInclude,
+        });
+        for (const version of versions) {
+          changes.push({ action: "updated", skill: serializeVersion(version) });
+        }
+      }
       await auditLog(
         {
           ...params.actor,
@@ -524,6 +656,7 @@ export class SkillService {
       );
       return target.id;
     });
+    await this.publishChanges(changes, params.actor);
     return this.getById({ projectId: params.projectId, skillId });
   }
 
@@ -532,12 +665,13 @@ export class SkillService {
     name: string;
     actor: SkillActor;
   }): Promise<void> {
+    const changes: SkillChange[] = [];
     const where = { projectId: params.projectId, name: params.name };
-    await this.prisma.$transaction(async (tx) => {
+    const versions = await this.prisma.$transaction(async (tx) => {
       await this.lockSkill(tx, params.projectId, params.name);
       const versions = await tx.skill.findMany({
         where,
-        select: { version: true, labels: true, tags: true },
+        include: skillFilesInclude,
         orderBy: { version: "asc" },
       });
       if (!versions.length) throw new LangfuseNotFoundError("Skill not found");
@@ -564,6 +698,18 @@ export class SkillService {
         tx,
       );
       await tx.skill.deleteMany({ where });
+      changes.push(
+        ...versions.map((skill) => ({
+          action: "deleted" as const,
+          skill: serializeVersion(skill),
+        })),
+      );
+      return versions.map(({ version }) => ({ name: params.name, version }));
+    });
+    await this.publishChanges(changes, params.actor);
+    await this.skillCacheService.invalidateCache({
+      projectId: params.projectId,
+      versions,
     });
   }
 
@@ -573,6 +719,7 @@ export class SkillService {
     version: number;
     actor: SkillActor;
   }): Promise<void> {
+    const changes: SkillChange[] = [];
     await this.prisma.$transaction(async (tx) => {
       await this.lockSkill(tx, params.projectId, params.name);
       const target = await tx.skill.findFirst({
@@ -604,20 +751,30 @@ export class SkillService {
       await tx.skill.delete({
         where: { projectId: params.projectId, id: target.id },
       });
+      changes.push({ action: "deleted", skill: serializeVersion(target) });
       if (target.labels.includes(SKILL_LATEST_LABEL)) {
         const latest = await tx.skill.findFirst({
           where: { projectId: params.projectId, name: params.name },
           orderBy: { version: "desc" },
-          select: { id: true, labels: true },
+          include: skillFilesInclude,
         });
         if (latest) {
           const labels = [...new Set([...latest.labels, SKILL_LATEST_LABEL])];
-          await tx.skill.update({
+          const updated = await tx.skill.update({
             where: {
               projectId: params.projectId,
               id: latest.id,
             },
             data: { labels: { set: labels } },
+            select: { updatedAt: true },
+          });
+          changes.push({
+            action: "updated",
+            skill: serializeVersion({
+              ...latest,
+              labels,
+              updatedAt: updated.updatedAt,
+            }),
           });
           await auditLog(
             {
@@ -634,6 +791,52 @@ export class SkillService {
         }
       }
     });
+    await this.publishChanges(changes, params.actor);
+    await this.skillCacheService.invalidateCache({
+      projectId: params.projectId,
+      versions: [{ name: params.name, version: params.version }],
+    });
+  }
+
+  private async publishChanges(changes: SkillChange[], actor: SkillActor) {
+    const user = "session" in actor ? actor.session.user : undefined;
+    await Promise.all(
+      changes.map(async ({ skill, action }) => {
+        try {
+          await EntityChangeQueue.getInstance()?.add(
+            QueueName.EntityChangeQueue,
+            {
+              timestamp: new Date(),
+              id: randomUUID(),
+              name: QueueJobs.EntityChangeJob,
+              payload: {
+                entityType: "skill-version",
+                projectId: skill.projectId,
+                skillId: skill.id,
+                action,
+                skill,
+                ...(user
+                  ? {
+                      user: {
+                        id: user.id,
+                        name: user.name ?? null,
+                        email: user.email ?? null,
+                      },
+                    }
+                  : {}),
+              },
+            },
+          );
+        } catch (error) {
+          logger.error("Failed to publish skill change event", {
+            error,
+            projectId: skill.projectId,
+            skillId: skill.id,
+            action,
+          });
+        }
+      }),
+    );
   }
 
   private async prepareVersionFiles(params: {
@@ -717,16 +920,17 @@ export class SkillService {
     projectId: string;
     latest: { id: string; labels: string[] };
     actor: SkillActor;
-  }): Promise<void> {
+  }) {
     const labels = params.latest.labels.filter(
       (label) => label !== SKILL_LATEST_LABEL,
     );
-    await params.tx.skill.update({
+    const updated = await params.tx.skill.update({
       where: {
         projectId: params.projectId,
         id: params.latest.id,
       },
       data: { labels: { set: labels } },
+      select: { updatedAt: true },
     });
     await auditLog(
       {
@@ -740,6 +944,7 @@ export class SkillService {
       },
       params.tx,
     );
+    return { labels, updatedAt: updated.updatedAt };
   }
 
   private async storeVersionFiles(params: {
@@ -852,6 +1057,7 @@ export class SkillService {
     projectId: string;
     name: string;
     selector: SkillSelector;
+    fallbackToLatest?: boolean;
   }): Promise<SkillWithRelations> {
     const selectorWhere: Prisma.SkillWhereInput = params.selector.version
       ? { version: params.selector.version }
@@ -866,6 +1072,17 @@ export class SkillService {
       orderBy: { version: "desc" },
       include: skillFilesInclude,
     });
+    if (
+      !skill &&
+      params.fallbackToLatest &&
+      params.selector.version === undefined &&
+      params.selector.label === undefined
+    ) {
+      return this.findSkillVersion({
+        ...params,
+        selector: { label: SKILL_LATEST_LABEL },
+      });
+    }
     if (!skill) throw new LangfuseNotFoundError("Skill version not found");
     return skill;
   }

@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { auditLog } from "@/src/features/audit-logs/server";
-import { throwIfNoProjectAccess } from "@/src/features/rbac";
+import { auditLog } from "@/src/features/audit-logs/auditLog";
+import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import {
   applyCommentFilters,
   traceException,
@@ -10,6 +10,7 @@ import {
   getSessionsTableCountFromEvents,
   getSessionMetricsFromEvents,
   getSessionTracesFromEvents,
+  getObservationsForTraceFromEventsTable,
   getObservationsWithModelDataFromEventsTable,
   getObservationFullIOForSessionFromEventsTable,
   getTracesGroupedByTags,
@@ -29,6 +30,8 @@ import {
   getEventsGroupedByTraceTags,
   hasAnySessionFromEventsTable,
   parseClickhouseUTCDateTimeFormat,
+  isStorableTraceSessionId,
+  storableTraceSessionIds,
 } from "@langfuse/shared/src/server";
 import {
   createTRPCRouter,
@@ -48,15 +51,21 @@ import {
   type SessionOptions,
   type ScoreDomain,
   LISTABLE_SCORE_TYPES,
+  sessionTraceFilterSchema,
 } from "@langfuse/shared";
 import { TRPCError } from "@trpc/server";
 import Decimal from "decimal.js";
 import chunk from "lodash/chunk";
-import { aggregateScores } from "@/src/features/scores/server";
+import { aggregateScores } from "@/src/features/scores/lib/aggregateScores";
 import {
   toDomainArrayWithStringifiedMetadata,
   toDomainWithStringifiedMetadata,
 } from "@/src/utils/clientSideDomainTypes";
+
+const storableSessionIdInput = z.string().refine(isStorableTraceSessionId, {
+  message:
+    "This session id contains a null character, which cannot be bookmarked or published.",
+});
 
 const SessionCountOptions = z.object({
   projectId: z.string(), // Required for protectedProjectProcedure
@@ -101,12 +110,14 @@ const handleGetSessionById = async (input: {
     prisma: PrismaClient;
   };
 }) => {
-  const postgresSession = await input.ctx.prisma.traceSession.findFirst({
-    where: {
-      id: input.sessionId,
-      projectId: input.projectId,
-    },
-  });
+  const postgresSession = isStorableTraceSessionId(input.sessionId)
+    ? await input.ctx.prisma.traceSession.findFirst({
+        where: {
+          id: input.sessionId,
+          projectId: input.projectId,
+        },
+      })
+    : null;
 
   if (!postgresSession) {
     throw new TRPCError({
@@ -227,7 +238,7 @@ export const sessionRouter = createTRPCRouter({
       const prismaSessionInfo = await ctx.prisma.traceSession.findMany({
         where: {
           id: {
-            in: sessions.map((s) => s.session_id),
+            in: storableTraceSessionIds(sessions.map((s) => s.session_id)),
           },
           projectId: input.projectId,
         },
@@ -282,6 +293,14 @@ export const sessionRouter = createTRPCRouter({
       const sessions = await getSessionsTableFromEvents({
         projectId: input.projectId,
         filter: finalFilter,
+        fields: [
+          "session_id",
+          "user_ids",
+          "trace_count",
+          "trace_tags",
+          "min_timestamp",
+          "environment",
+        ],
         orderBy: normalizedOrderBy,
         page: input.page,
         limit: input.limit,
@@ -290,7 +309,7 @@ export const sessionRouter = createTRPCRouter({
       const prismaSessionInfo = await ctx.prisma.traceSession.findMany({
         where: {
           id: {
-            in: sessions.map((s) => s.session_id),
+            in: storableTraceSessionIds(sessions.map((s) => s.session_id)),
           },
           projectId: input.projectId,
         },
@@ -412,7 +431,7 @@ export const sessionRouter = createTRPCRouter({
       const prismaSessionInfo = await ctx.prisma.traceSession.findMany({
         where: {
           id: {
-            in: sessions.map((s) => s.session_id),
+            in: storableTraceSessionIds(sessions.map((s) => s.session_id)),
           },
           projectId: input.projectId,
         },
@@ -473,13 +492,29 @@ export const sessionRouter = createTRPCRouter({
       const sessions = await getSessionMetricsFromEvents({
         projectId: input.projectId,
         sessionIds: input.sessionIds,
+        fields: [
+          "session_id",
+          "user_ids",
+          "trace_count",
+          "trace_tags",
+          "min_timestamp",
+          "environment",
+          "total_observations",
+          "duration",
+          "session_input_cost",
+          "session_output_cost",
+          "session_total_cost",
+          "session_input_usage",
+          "session_output_usage",
+          "session_total_usage",
+        ],
         queryFromTimestamp: input.queryFromTimestamp ?? undefined,
       });
 
       const prismaSessionInfo = await ctx.prisma.traceSession.findMany({
         where: {
           id: {
-            in: sessions.map((s) => s.session_id),
+            in: storableTraceSessionIds(sessions.map((s) => s.session_id)),
           },
           projectId: input.projectId,
         },
@@ -703,6 +738,52 @@ export const sessionRouter = createTRPCRouter({
         scores: toDomainArrayWithStringifiedMetadata(validatedScores),
       };
     }),
+  previewTree: protectedGetSessionProcedure
+    .input(
+      z.object({
+        projectId: z.string(),
+        sessionId: z.string(),
+      }),
+    )
+    .query(async ({ input }) => {
+      const traces = await getSessionTracesFromEvents({
+        ...input,
+        filter: [],
+        limit: 5,
+      });
+      if (traces.length === 0) return [];
+      return Promise.all(
+        traces.map(async (trace) => {
+          const source = {
+            projectId: input.projectId,
+            traceId: trace.id,
+            timestamp: trace.timestamp,
+          };
+          const structure = await getObservationsForTraceFromEventsTable({
+            ...source,
+            limit: 200,
+            selectMetadata: true,
+          });
+          return {
+            id: trace.id,
+            name: trace.name,
+            truncated: structure.totalCount > structure.observations.length,
+            observations: structure.observations.map((observation) => ({
+              id: observation.id,
+              parentObservationId: observation.parentObservationId,
+              name: observation.name,
+              type: observation.type,
+              level: observation.level,
+              isRootObservation: observation.isRootObservation,
+              userId: observation.userId,
+              environment: observation.environment,
+              traceTags: observation.traceTags,
+              metadata: observation.metadata,
+            })),
+          };
+        }),
+      );
+    }),
   byIdWithScoresFromEvents: protectedGetSessionProcedure
     .input(
       z.object({
@@ -719,17 +800,30 @@ export const sessionRouter = createTRPCRouter({
         getSessionMetricsFromEvents({
           projectId: input.projectId,
           sessionIds: [input.sessionId],
+          fields: [
+            "user_ids",
+            "trace_count",
+            "session_total_cost",
+            "session_input_usage",
+            "session_output_usage",
+            "session_total_usage",
+            "min_timestamp",
+            "max_timestamp",
+            "environment",
+          ],
         }).then((rows) => rows[0]),
-        ctx.prisma.traceSession.findFirst({
-          where: {
-            id: input.sessionId,
-            projectId: input.projectId,
-          },
-          select: {
-            bookmarked: true,
-            public: true,
-          },
-        }),
+        isStorableTraceSessionId(input.sessionId)
+          ? ctx.prisma.traceSession.findFirst({
+              where: {
+                id: input.sessionId,
+                projectId: input.projectId,
+              },
+              select: {
+                bookmarked: true,
+                public: true,
+              },
+            })
+          : null,
       ]);
 
       if (!sessionMetrics) {
@@ -776,12 +870,14 @@ export const sessionRouter = createTRPCRouter({
       z.object({
         sessionId: z.string(), // used for security check
         projectId: z.string(), // used for security check
+        filter: sessionTraceFilterSchema.optional(),
       }),
     )
     .query(async ({ input }) => {
       const traces = await getSessionTracesFromEvents({
         projectId: input.projectId,
         sessionId: input.sessionId,
+        filter: input.filter ?? [],
       });
 
       const chunks = chunk(traces, 500);
@@ -1008,7 +1104,7 @@ export const sessionRouter = createTRPCRouter({
   bookmark: protectedProjectProcedure
     .input(
       z.object({
-        sessionId: z.string(),
+        sessionId: storableSessionIdInput,
         projectId: z.string(),
         bookmarked: z.boolean(),
       }),
@@ -1049,7 +1145,7 @@ export const sessionRouter = createTRPCRouter({
     .input(
       z.object({
         projectId: z.string(),
-        sessionId: z.string().min(1),
+        sessionId: storableSessionIdInput.min(1),
         public: z.boolean(),
       }),
     )

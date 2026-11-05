@@ -10,6 +10,7 @@ import {
   offset,
   safePolygon,
   shift,
+  size,
   useClick,
   useDismiss,
   useFloating,
@@ -24,12 +25,14 @@ import {
   type Placement,
 } from "@floating-ui/react";
 import { cva } from "class-variance-authority";
-import { ChevronRight, type LucideIcon } from "lucide-react";
+import { X, type IconComponent } from "@langfuse/icons";
+import { DropdownIndicator } from "@/src/components/design-system/DropdownIndicator/DropdownIndicator";
 import Link from "next/link";
 import * as React from "react";
 
 import { useLayerContainer } from "@/src/context/LayerContext/LayerContext";
 import { useScrollGradients } from "@/src/hooks/useScrollGradients";
+import { Badge } from "@/src/components/design-system/Badge/Badge";
 import { Checkbox } from "@/src/components/design-system/Checkbox/Checkbox";
 
 const menuVariants = cva(
@@ -121,13 +124,14 @@ type DropdownMenuItem = {
   id: string;
   title: string;
   tooltip?: string;
-  icon?: LucideIcon;
+  badge?: React.ReactNode;
+  icon?: IconComponent;
   searchBehavior?: SearchBehavior;
   type: "item";
   variant?: "default" | "destructive";
   secondaryAction?: MenuAction & {
     ariaLabel: string;
-    icon: LucideIcon;
+    icon: IconComponent;
   };
 } & DropdownMenuItemAction;
 
@@ -137,7 +141,7 @@ type DropdownMenuCheckboxItem = {
   disabled?: { reason: string };
   id: string;
   title: string;
-  icon?: LucideIcon;
+  icon?: IconComponent;
   searchBehavior?: SearchBehavior;
   onCheckedChange: (checked: boolean) => void;
   type: "checkbox";
@@ -147,7 +151,8 @@ type DropdownMenuSubmenu = {
   disabled?: { reason: string };
   id: string;
   title: string;
-  icon?: LucideIcon;
+  internal?: boolean;
+  icon?: IconComponent;
   items: DropdownMenuItemDefinition[];
   searchBehavior?: SearchBehavior;
   search?: { placeholder: string };
@@ -171,9 +176,13 @@ type DropdownMenuProps = {
   items: DropdownMenuItemDefinition[];
   disabled?: boolean;
   maxHeight?: React.CSSProperties["maxHeight"];
+  /** Sizes the menu to the trigger's width, e.g. for a full-width button. */
+  matchTriggerWidth?: boolean;
   placement?: Placement;
   search?: { placeholder: string };
   title?: string;
+  /** Marks an internal-only menu with the Internal badge in the header. */
+  internal?: boolean;
   description?: string;
 };
 
@@ -197,12 +206,15 @@ function DropdownMenuNode({
   children,
   description,
   disabled = false,
+  internal = false,
   items,
   maxHeight = "15rem",
+  matchTriggerWidth = false,
   placement = "bottom-start",
   search,
   title,
 }: DropdownMenuProps) {
+  const hasHeader = Boolean(title) || internal;
   const [isOpen, setIsOpen] = React.useState(false);
   const [activeIndex, setActiveIndex] = React.useState<number | null>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
@@ -211,6 +223,7 @@ function DropdownMenuNode({
   const tree = useFloatingTree();
   const isNested = parentId !== null;
   const layerContainer = useLayerContainer("popover");
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
   const listRef = React.useRef<Array<HTMLElement | null>>([]);
   const labelsRef = React.useRef<Array<string | null>>([]);
   const closeMenu = React.useCallback(() => {
@@ -233,7 +246,20 @@ function DropdownMenuNode({
       if (open) tree?.events.emit("menuopen", { nodeId, parentId });
     },
     placement,
-    middleware: [offset(4), flip(), shift({ padding: 8, crossAxis: true })],
+    middleware: [
+      offset(4),
+      flip(),
+      shift({ padding: 8, crossAxis: true }),
+      ...(matchTriggerWidth
+        ? [
+            size({
+              apply({ rects, elements }) {
+                elements.floating.style.width = `${rects.reference.width}px`;
+              },
+            }),
+          ]
+        : []),
+    ],
     transform: false,
     whileElementsMounted: autoUpdate,
   });
@@ -331,9 +357,16 @@ function DropdownMenuNode({
                   }
                 : {})}
             >
-              {title ? (
+              {hasHeader ? (
                 <div className="border-border bg-popover sticky top-0 z-1 border-b px-3 py-2.5 text-sm font-bold">
-                  {title}
+                  {internal ? (
+                    <div className="flex items-center gap-2">
+                      {title}
+                      <Badge text="Internal" color="yellow" size="sm" />
+                    </div>
+                  ) : (
+                    title
+                  )}
                   {description && (
                     <p className="text-muted-foreground mt-1 text-xs font-normal">
                       {description}
@@ -343,44 +376,68 @@ function DropdownMenuNode({
               ) : null}
               {search ? (
                 <div className="border-border bg-popover sticky top-0 z-1 border-b p-1.5">
-                  <input
-                    type="search"
-                    value={searchQuery}
-                    placeholder={search.placeholder}
-                    aria-label={search.placeholder}
-                    className="border-input bg-background focus:ring-ring h-8 w-full rounded-md border px-2 text-sm outline-hidden focus:ring-1"
-                    onChange={(event) => {
-                      setSearchQuery(event.target.value);
-                      setActiveIndex(null);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") {
-                        closeMenu();
-                        event.preventDefault();
-                      } else if (event.key === "ArrowDown") {
-                        const firstIndex = listRef.current
-                          .slice(0, visibleItems.length)
-                          .findIndex((element) => element !== null);
-                        setActiveIndex(firstIndex === -1 ? null : firstIndex);
-                        listRef.current[firstIndex]?.focus();
-                        event.preventDefault();
-                      } else if (event.key === "ArrowUp") {
-                        const lastIndex = listRef.current
-                          .slice(0, visibleItems.length)
-                          .findLastIndex((element) => element !== null);
-                        setActiveIndex(lastIndex === -1 ? null : lastIndex);
-                        listRef.current[lastIndex]?.focus();
-                        event.preventDefault();
-                      }
+                  <div className="relative">
+                    <input
+                      ref={searchInputRef}
+                      type="search"
+                      value={searchQuery}
+                      placeholder={search.placeholder}
+                      aria-label={search.placeholder}
+                      className="border-input bg-background focus:ring-ring h-8 w-full rounded-md border pr-8 pl-2 text-sm outline-hidden focus:ring-1 [&::-webkit-search-cancel-button]:hidden"
+                      onChange={(event) => {
+                        setSearchQuery(event.target.value);
+                        setActiveIndex(null);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          closeMenu();
+                          event.preventDefault();
+                        } else if (event.key === "ArrowDown") {
+                          const firstIndex = listRef.current
+                            .slice(0, visibleItems.length)
+                            .findIndex((element) => element !== null);
+                          setActiveIndex(firstIndex === -1 ? null : firstIndex);
+                          listRef.current[firstIndex]?.focus();
+                          event.preventDefault();
+                        } else if (event.key === "ArrowUp") {
+                          const lastIndex = listRef.current
+                            .slice(0, visibleItems.length)
+                            .findLastIndex((element) => element !== null);
+                          setActiveIndex(lastIndex === -1 ? null : lastIndex);
+                          listRef.current[lastIndex]?.focus();
+                          event.preventDefault();
+                        }
 
-                      event.stopPropagation();
-                    }}
-                  />
+                        event.stopPropagation();
+                      }}
+                    />
+                    {searchQuery !== "" && (
+                      <button
+                        type="button"
+                        aria-label="Clear search"
+                        // Not a tab stop, matching the native control it
+                        // replaces.
+                        tabIndex={-1}
+                        // The button unmounts as soon as the query clears, so
+                        // hand focus back to the field. That also keeps DOM
+                        // focus and the cleared activeIndex in agreement when
+                        // the list had been arrowed into.
+                        onClick={() => {
+                          setSearchQuery("");
+                          setActiveIndex(null);
+                          searchInputRef.current?.focus();
+                        }}
+                        className="text-muted-foreground hover:bg-accent hover:text-accent-foreground absolute top-1/2 right-1.5 flex size-6 -translate-y-1/2 items-center justify-center rounded-sm"
+                      >
+                        <X size="base" aria-hidden />
+                      </button>
+                    )}
+                  </div>
                 </div>
               ) : null}
               <div
                 className={menuBodyVariants({
-                  hasTitle: Boolean(title || search),
+                  hasTitle: hasHeader || Boolean(search),
                   showBottomGradient: bottom,
                   showTopGradient: top,
                 })}
@@ -450,17 +507,24 @@ function DropdownMenuNode({
                             <span className={primaryActionVariants()}>
                               {ItemIcon ? (
                                 <ItemIcon
-                                  className="mr-1.5 size-4"
+                                  color="default"
+                                  __rawClassName="mr-1.5"
                                   aria-hidden="true"
                                 />
                               ) : null}
                               <span className="min-w-0 flex-1 overflow-hidden text-left text-ellipsis whitespace-nowrap">
                                 {item.title}
                               </span>
-                              <ChevronRight
-                                className="ml-2 size-4"
-                                aria-hidden="true"
-                              />
+                              {item.internal ? (
+                                <Badge
+                                  text="Internal"
+                                  color="yellow"
+                                  size="sm"
+                                />
+                              ) : null}
+                              <span className="ml-2 flex">
+                                <DropdownIndicator direction="right" />
+                              </span>
                             </span>
                           </button>
                         )}
@@ -509,7 +573,8 @@ function DropdownMenuNode({
                         <span className={primaryActionVariants()}>
                           {ItemIcon ? (
                             <ItemIcon
-                              className="mr-1.5 size-4"
+                              color="default"
+                              __rawClassName="mr-1.5"
                               aria-hidden="true"
                             />
                           ) : null}
@@ -565,7 +630,15 @@ function DropdownMenuNode({
                           }}
                           {...interactionProps}
                         >
-                          <SecondaryIcon size={12} aria-hidden="true" />
+                          <SecondaryIcon
+                            size="sm"
+                            color={
+                              item.variant === "destructive"
+                                ? "inherit"
+                                : "default"
+                            }
+                            aria-hidden="true"
+                          />
                         </Link>
                       );
                     } else {
@@ -584,7 +657,15 @@ function DropdownMenuNode({
                           }}
                           {...interactionProps}
                         >
-                          <SecondaryIcon size={12} aria-hidden="true" />
+                          <SecondaryIcon
+                            size="sm"
+                            color={
+                              item.variant === "destructive"
+                                ? "inherit"
+                                : "default"
+                            }
+                            aria-hidden="true"
+                          />
                         </button>
                       );
                     }
@@ -651,7 +732,12 @@ function DropdownMenuNode({
                         >
                           {ItemIcon ? (
                             <ItemIcon
-                              className="mr-1.5 size-4"
+                              color={
+                                item.variant === "destructive"
+                                  ? "inherit"
+                                  : "default"
+                              }
+                              __rawClassName="mr-1.5"
                               aria-hidden="true"
                             />
                           ) : null}
@@ -661,6 +747,9 @@ function DropdownMenuNode({
                           >
                             {item.title}
                           </span>
+                          {item.badge ? (
+                            <span className="ml-2 shrink-0">{item.badge}</span>
+                          ) : null}
                         </Link>
                       ) : (
                         <button
@@ -675,7 +764,12 @@ function DropdownMenuNode({
                         >
                           {ItemIcon ? (
                             <ItemIcon
-                              className="mr-1.5 size-4"
+                              color={
+                                item.variant === "destructive"
+                                  ? "inherit"
+                                  : "default"
+                              }
+                              __rawClassName="mr-1.5"
                               aria-hidden="true"
                             />
                           ) : null}
@@ -685,6 +779,9 @@ function DropdownMenuNode({
                           >
                             {item.title}
                           </span>
+                          {item.badge ? (
+                            <span className="ml-2 shrink-0">{item.badge}</span>
+                          ) : null}
                         </button>
                       )}
                       {renderedSecondaryAction}

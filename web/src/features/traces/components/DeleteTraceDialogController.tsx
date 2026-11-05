@@ -1,11 +1,11 @@
 import { useRouter } from "next/router";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 
 import { ConfirmationDialogController } from "@/src/components/design-system/ConfirmationDialogController/ConfirmationDialogController";
-import { useHasEntitlement } from "@/src/features/entitlements";
-import { showSuccessToast } from "@/src/features/notifications";
-import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
-import { useHasProjectAccess } from "@/src/features/rbac";
+import { useHasEntitlement } from "@/src/features/entitlements/hooks";
+import { showSuccessToast } from "@/src/features/notifications/showSuccessToast";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { api } from "@/src/utils/api";
 
 export function DeleteTraceDialogController({
@@ -34,12 +34,15 @@ export function DeleteTraceDialogController({
   const hasEntitlement = useHasEntitlement("trace-deletion");
   const deleteMutation = api.traces.deleteMany.useMutation();
 
-  let disabled: { reason: string } | undefined;
-  if (!hasAccess) {
-    disabled = { reason: "You don't have permission to delete this trace." };
-  } else if (!hasEntitlement) {
-    disabled = { reason: "Trace deletion is not available on your plan." };
-  }
+  const disabled = useMemo(() => {
+    if (!hasAccess) {
+      return { reason: "You don't have permission to delete this trace." };
+    }
+    if (!hasEntitlement) {
+      return { reason: "Trace deletion is not available on your plan." };
+    }
+    return undefined;
+  }, [hasAccess, hasEntitlement]);
 
   return (
     <ConfirmationDialogController
@@ -54,6 +57,7 @@ export function DeleteTraceDialogController({
         await deleteMutation.mutateAsync({ traceIds: [traceId], projectId });
         setIsDeleted(true);
         showSuccessToast({
+          operation: "trace.delete",
           title: "Trace deleted",
           description:
             "Selected trace will be deleted. Traces are removed asynchronously and may continue to be visible for up to 24 hours.",

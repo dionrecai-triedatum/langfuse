@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { auditLog } from "@/src/features/audit-logs/server";
-import { throwIfNoProjectAccess } from "@/src/features/rbac";
-import { aggregateScores } from "@/src/features/scores/server";
+import { auditLog } from "@/src/features/audit-logs/auditLog";
+import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
+import { aggregateScores } from "@/src/features/scores/lib/aggregateScores";
 import {
   applyCommentFilters,
   traceException,
@@ -35,6 +35,7 @@ import {
   protectedProjectProcedure,
 } from "@/src/server/api/trpc";
 import {
+  isoDateTime,
   BatchActionQuerySchema,
   BatchTableNames,
   BatchExportTableName,
@@ -54,15 +55,17 @@ import {
   ScoreDataTypeArray,
   ScoreDataTypeEnum,
   LISTABLE_SCORE_TYPES,
+  LangfuseNotFoundError,
 } from "@langfuse/shared";
 import { TRPCError } from "@trpc/server";
-import { createBatchActionJob } from "@/src/features/table/server";
-import { throwIfNoEntitlement } from "@/src/features/entitlements/server";
-import { sanitizeLegacyTracingSearch } from "@/src/features/traces/server";
+import { createBatchActionJob } from "@/src/features/table/server/createBatchActionJob";
+import { throwIfNoEntitlement } from "@/src/features/entitlements/server/hasEntitlement";
+import { sanitizeLegacyTracingSearch } from "@/src/features/traces/server/legacyIoSearch";
 import {
   type AgentGraphDataResponse,
   AgentGraphDataSchema,
-} from "@/src/features/trace-graph-view/server";
+} from "@/src/features/trace-graph-view/types";
+
 import { env } from "@/src/env.mjs";
 import {
   toDomainWithStringifiedMetadata,
@@ -559,7 +562,9 @@ export const traceRouter = createTRPCRouter({
           ),
         );
 
-        await traceDeletionProcessor(input.projectId, input.traceIds);
+        await traceDeletionProcessor(input.projectId, input.traceIds, {
+          actor: { type: "USER", userId: ctx.session.user.id },
+        });
       }
     }),
   bookmark: protectedProjectProcedure
@@ -636,58 +641,45 @@ export const traceRouter = createTRPCRouter({
         projectId: input.projectId,
         scope: "objects:publish",
       });
-      try {
-        await auditLog({
-          session: ctx.session,
-          resourceType: "trace",
-          resourceId: input.traceId,
-          action: "publish",
-          after: input.public,
-        });
+      await auditLog({
+        session: ctx.session,
+        resourceType: "trace",
+        resourceId: input.traceId,
+        action: "publish",
+        after: input.public,
+      });
 
-        // eslint-disable-next-line @typescript-eslint/no-deprecated
-        const clickhouseTrace = await getTraceById({
-          traceId: input.traceId,
-          projectId: input.projectId,
-        });
-        if (!clickhouseTrace) {
-          logger.error(
-            `Trace not found in Clickhouse: ${input.traceId}. Skipping publishing.`,
-          );
-          throw new TRPCError({
-            code: "NOT_FOUND",
-            message: "Trace not found",
-          });
-        }
-        clickhouseTrace.public = input.public;
-        const promises = [
-          upsertTrace(convertTraceDomainToClickhouse(clickhouseTrace)),
-        ];
-        if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "legacy") {
-          promises.push(
-            updateEvents(
-              input.projectId,
-              { traceIds: [clickhouseTrace.id] },
-              { public: input.public },
-            ),
-          );
-        }
-        await Promise.all(promises);
-        return clickhouseTrace;
-      } catch (error) {
-        logger.error("Failed to call traces.publish", error);
-        throw new TRPCError({
-          code: "INTERNAL_SERVER_ERROR",
-        });
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
+      const clickhouseTrace = await getTraceById({
+        traceId: input.traceId,
+        projectId: input.projectId,
+      });
+      if (!clickhouseTrace) {
+        throw new LangfuseNotFoundError("Trace not found");
       }
+      clickhouseTrace.public = input.public;
+      const promises = [
+        upsertTrace(convertTraceDomainToClickhouse(clickhouseTrace)),
+      ];
+      if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "legacy") {
+        promises.push(
+          updateEvents(
+            input.projectId,
+            { traceIds: [clickhouseTrace.id] },
+            { public: input.public },
+          ),
+        );
+      }
+      await Promise.all(promises);
+      return clickhouseTrace;
     }),
   getAgentGraphData: protectedGetTraceProcedure
     .input(
       z.object({
         projectId: z.string(),
         traceId: z.string(),
-        minStartTime: z.iso.datetime({ offset: true }),
-        maxStartTime: z.iso.datetime({ offset: true }),
+        minStartTime: isoDateTime({ offset: true }),
+        maxStartTime: isoDateTime({ offset: true }),
         // Optional fields for enforceTraceAccess middleware (supports public traces)
         timestamp: z.date().nullish(),
         fromTimestamp: z.date().nullish(),
