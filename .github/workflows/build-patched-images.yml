@@ -16,8 +16,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Reads the pnpm version from package.json `devEngines.packageManager`.
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          install: false
+          cache: false
 
       - name: Set up Node
         uses: actions/setup-node@v4
