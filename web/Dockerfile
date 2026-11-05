@@ -124,7 +124,7 @@ RUN mkdir -p /opt/dd/node_modules && \
     fi && \
     prune-node-modules /opt/dd/node_modules
 
-FROM --platform=${BUILDPLATFORM} golang:1.26.8 AS migrate-builder
+FROM --platform=${BUILDPLATFORM} golang:1.26 AS migrate-builder
 ARG TARGETOS
 ARG TARGETARCH
 ENV CGO_ENABLED=0 \
